@@ -46,7 +46,8 @@ subcellae/
   clustering/       KMeans and DBSCAN utilities
   classification/   helper functions for sklearn-based classifiers
   analysis/         feature extraction helpers (legacy)
-  utils/            small utility modules
+  utils/
+    label_colors.py   fixed tab10 colour map for FA-type and position labels
   pipeline/
     patchprep_pipeline.py     Stage 1 orchestration
     ae_pipeline.py            Stage 2 orchestration
@@ -74,6 +75,8 @@ scripts/
 
 Extracts centred square patches from CZI or NPY microscopy images, applies optional normalisation (per-image or per-dataset percentile stretch), and saves individual `.tif` files.
 
+For each accepted patch the pipeline also computes **8 rotation- and scale-invariant distance-to-boundary features** (`d00`–`d07`) by casting rays in 8 evenly-spaced directions from the patch centre to the cell boundary.  Distances are normalised by the cell equivalent diameter (`equiv_diam = 2√(area/π)`) and cyclically shifted so the direction of minimum distance comes first.  These features are written to the patch record CSV alongside the spatial metadata.
+
 **Config keys:**
 
 | Key | Description |
@@ -85,6 +88,7 @@ Extracts centred square patches from CZI or NPY microscopy images, applies optio
 | `patch_prefix` | string prepended to every patch filename (e.g. `"control"`) |
 | `major_ch` | channel index used for patch detection |
 | `norm_channels` | channels to normalise (must include `major_ch`) |
+| `n_dist_orientations` | number of ray directions for distance features (default `8`) |
 
 **Run:**
 
@@ -96,6 +100,16 @@ python scripts/run_patchprep_from_config.py config/config_control_czi_dataset_no
 
 ```
 {prefix}_f{image_id}x{x_centre}y{y_centre}ps{patch_size}.tif
+```
+
+Plus a CSV record per image file:
+
+```
+data_prep_record_{condition}_ch{ch}_f_{start}_to_{end}.csv
+  columns: image_folder · filename · filenameID · x_c · y_c · rand_angle ·
+           rand_tx · rand_ty · x/y_corner1–4 · movie_partitioned_data_dir ·
+           crop_img_filename · movie_plot_dir · plot_filename ·
+           equiv_diam · d00 … d07
 ```
 
 ---
@@ -221,7 +235,16 @@ kmeans_model.pkl
 
 ## Stage 4 — Classification
 
-Trains a LightGBM classifier on the `z_*` latent features and evaluates it against ground-truth labels from an external annotation CSV.
+Trains a LightGBM classifier on latent features (`z_*`) and optionally on combined latent + distance features (`z_*` + `d00`–`d07`), then evaluates against ground-truth labels from an external annotation CSV.
+
+### Feature modes
+
+| Mode | Feature set | Typical `out_dir` name |
+|------|-------------|------------------------|
+| Latent only | `z_0`…`z_{N-1}` | `fa_type_classification` |
+| Latent + distance | `z_0`…`z_{N-1}` + `d00`…`d07` | `fa_type_classification_lat_dist` |
+
+Distance features come from the `data_prep_record_*_to_<N>.csv` files written in Stage 1.  The pipeline finds the file with the largest `N` in each supplied directory, concatenates them, and merges on `crop_img_filename`.  Because the normalised distances are on a 0–1 ratio scale while latent dimensions are larger in magnitude, a `feature_weight` multiplier (default `100`) is applied to all `d*` columns before both the classifier and UMAP.
 
 **Config keys:**
 
@@ -248,6 +271,16 @@ lightgbm:
   learning_rate: 0.05
   class_weight : "balanced"
   n_cv_folds   : 5        # 0 = skip CV
+
+dist_features:
+  patch_prep_dirs:         # omit or set to null for latent-only mode
+    - "/path/to/control/plots"
+    - "/path/to/ycomp/plots"
+  feature_weight: 100.0   # multiplier applied to d* cols before classifier + UMAP
+
+patch_sort:
+  sort_labelled  : true   # copy train/val patches into gt{x}pred{y} folders
+  sort_unlabelled: false  # copy unlabelled patches into test/gtnpred{y} folders
 ```
 
 **Run:**
@@ -260,14 +293,23 @@ python scripts/run_classification_from_config.py config/config_classification.ya
 
 ```
 lgbm_model.pkl
-metrics.txt                       # accuracy · balanced accuracy · F1 · CV summary
-metrics.csv                       # per-class precision / recall / F1
-confusion_matrix_counts.png
-confusion_matrix_norm.png
-feature_importance.png            # split and gain importance for each z_i
+metrics.txt                         # accuracy · balanced accuracy · F1 · CV summary
+metrics.csv                         # per-class precision / recall / F1
+confusion_matrix_counts_train.png
+confusion_matrix_norm_train.png
+confusion_matrix_counts_val.png
+confusion_matrix_norm_val.png
+feature_importance.png              # split and gain importance for each feature
 f1_per_class.png
-prob_by_true_class.png            # max predicted probability by true class
-classification_results.csv        # all labelled rows with predicted label + probabilities
+prob_by_true_class.png              # max predicted probability by true class
+classification_results.csv          # all labelled rows with predicted label + probabilities
+umap_predicted_label.png            # all patches coloured by predicted FA type (tab10)
+umap_true_label.png                 # labelled patches coloured by ground-truth FA type
+umap_all_model.pkl                  # fitted UMAP model
+patch_sort/
+  train/gt{x}pred{y}/               # labelled training patches
+  val/gt{x}pred{y}/                 # labelled validation patches
+  test/gtnpred{y}/                  # unlabelled patches (if sort_unlabelled: true)
 ```
 
 ---
@@ -275,7 +317,7 @@ classification_results.csv        # all labelled rows with predicted label + pro
 ## End-to-end Example
 
 ```bash
-# 1. Extract patches
+# 1. Extract patches (computes d00–d07 distance features automatically)
 python scripts/run_patchprep_from_config.py config/config_control_czi_dataset_norm.yaml
 python scripts/run_patchprep_from_config.py config/config_ycomp_czi_dataset_norm.yaml
 
@@ -285,7 +327,10 @@ python scripts/run_ae_from_config.py config/config_ae.yaml
 # 3. Analyse latent space
 python scripts/run_analysis_from_config.py config/config_analysis.yaml
 
-# 4. Classify FA types
+# 4a. Classify using latent features only
+python scripts/run_classification_from_config.py config/config_classification.yaml
+
+# 4b. Classify using latent + distance features (set dist_features.patch_prep_dirs in config)
 python scripts/run_classification_from_config.py config/config_classification.yaml
 ```
 
