@@ -1,0 +1,41 @@
+# =============================================================================
+# AE variant: baseline  (standard convolutional AE, no label supervision)
+# Results: results/test_run/baseline/
+# =============================================================================
+
+data:
+  patch_dirs:
+    - path           : "/mnt/d/lding/FA/analysis_results/FA_ML_Annabel_20250217/031125/pax_ch_patch/patch_control_20260318_2318"
+      condition      : 0
+      condition_name : "control"
+    - path           : "/mnt/d/lding/FA/analysis_results/FA_ML_Annabel_20250217/031125/pax_ch_patch/patch_ycomp_20260318_2325"
+      condition      : 1
+      condition_name : "ycomp"
+
+output:
+  result_dir : "/mnt/d/lding/CLS_GitHub/SubCellAE/results/test_run/baseline"
+
+model:
+  model_type   : "ae"
+  latent_dim   : 8
+  input_ps     : 32
+  no_ch        : 1
+  BN_flag      : false
+  dropout_flag : false
+
+training:
+  epochs         : 200
+  lr             : 0.001
+  batch_size     : 128
+  val_split      : 0.2
+  loss_norm_flag : false
+  group_split    : true
+
+reconstruction:
+  save_recon      : true
+  recon_pad_size  : 64
+  recon_image_size: 1024
+
+misc:
+  device    : "auto"
+  log_level : "INFO"

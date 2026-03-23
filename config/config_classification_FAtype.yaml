@@ -7,10 +7,10 @@
 # Input / Output
 # ---------------------------------------------------------------------------
 input:
-  latents_csv : "/mnt/d/lding/CLS_GitHub/SubCellAE/results/ae_run/baseline_AE/latents.csv"
+  latents_csv : "/mnt/d/lding/CLS_GitHub/SubCellAE/results/ae_run/semisup_fatype/latents.csv"
 
 output:
-  out_dir : "/mnt/d/lding/CLS_GitHub/SubCellAE/results/ae_run/baseline_AE/classification"
+  out_dir : "/mnt/d/lding/CLS_GitHub/SubCellAE/results/ae_run/semisup_fatype/FA_type_lat8_classification"
 
 # ---------------------------------------------------------------------------
 # Labels
@@ -86,10 +86,10 @@ dist_features:
   # filename.  Leave as null / [] to use latent features only.
   # Output will be written to the out_dir above; name it accordingly,
   # e.g. fa_type_classification_lat_dist.
-  # patch_prep_dirs: null
-  patch_prep_dirs:
-    - "/mnt/d/lding/FA/analysis_results/FA_ML_Annabel_20250217/031125/pax_ch_patch/plot_control_20260321_2300"
-    - "/mnt/d/lding/FA/analysis_results/FA_ML_Annabel_20250217/031125/pax_ch_patch/plot_ycomp_20260321_2255"
+  patch_prep_dirs: null
+  # patch_prep_dirs:
+  #   - "/mnt/d/lding/FA/analysis_results/FA_ML_Annabel_20250217/031125/pax_ch_patch/plot_control_20260321_2300"
+  #   - "/mnt/d/lding/FA/analysis_results/FA_ML_Annabel_20250217/031125/pax_ch_patch/plot_ycomp_20260321_2255"
 
   # Multiplicative weight for d* columns before classification and UMAP.
   # Latent features stay at ×1.  Use 100 to convert normalised distances

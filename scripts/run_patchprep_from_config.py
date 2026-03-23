@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -188,6 +189,11 @@ def main(argv: list[str] | None = None) -> None:
         "Done. %d total patches accepted across files %d–%d.",
         len(record), cfg.start_ind, cfg.end_ind - 1,
     )
+
+    # Copy config to the plot output directory for reproducibility
+    cfg.movie_plot_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(args.config, cfg.movie_plot_dir / Path(args.config).name)
+    log.info("Config copied to: %s", cfg.movie_plot_dir)
 
 
 if __name__ == "__main__":

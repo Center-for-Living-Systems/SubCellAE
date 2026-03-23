@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 from pathlib import Path
 
 try:
@@ -93,6 +94,14 @@ def load_config(yaml_path: str | Path) -> AEConfig:
     filename_col    = str(_get("annotation", "filename_col",    "crop_img_filename"))
     label_order     = _get("annotation", "label_order", None)   # list or None
 
+    # Second annotation (dual SemiSup)
+    annotation_file_2 = str(_get("annotation", "annotation_file_2", "") or "")
+    label_col_2       = str(_get("annotation", "label_col_2",       "Position"))
+    filename_col_2    = str(_get("annotation", "filename_col_2",    "crop_img_filename"))
+    label_order_2     = _get("annotation", "label_order_2", None)
+    num_classes_2     = int(_get("model",      "num_classes_2",     0))
+    lambda_cls_2      = float(_get("model",    "lambda_cls_2",      0.0))
+
     # Contrastive-specific
     proj_dim         = int(_get("model",   "proj_dim",         64))
     noise_prob       = float(_get("model", "noise_prob",       0.05))
@@ -149,6 +158,12 @@ def load_config(yaml_path: str | Path) -> AEConfig:
         label_col=label_col,
         filename_col=filename_col,
         label_order=label_order,
+        annotation_file_2=annotation_file_2,
+        label_col_2=label_col_2,
+        filename_col_2=filename_col_2,
+        label_order_2=label_order_2,
+        num_classes_2=num_classes_2,
+        lambda_cls_2=lambda_cls_2,
     )
 
 
@@ -210,6 +225,11 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     run_ae_pipeline(cfg)
+
+    # Copy config to the result directory for reproducibility
+    cfg.result_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(args.config, cfg.result_dir / Path(args.config).name)
+    log.info("Config copied to: %s", cfg.result_dir)
     log.info("Done.")
 
 

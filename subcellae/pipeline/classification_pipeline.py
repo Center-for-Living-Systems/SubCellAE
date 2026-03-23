@@ -15,7 +15,7 @@ Outputs saved to ``out_dir``:
   - ``prob_by_true_class.png``       – predicted max-probability by true class
   - ``classification_results.csv``   – labelled rows with predicted label + proba
   - ``lgbm_model.pkl``               – fitted LightGBM classifier
-  - ``umap_predicted_label.png``     – UMAP of ALL patches, coloured by predicted FA type (tab10)
+  - ``umap_predicted_label.png``     – UMAP of ALL patches, coloured by predicted label (tab10)
   - ``umap_true_label.png``          – UMAP of ALL patches, coloured by true label (where available)
   - ``umap_all_model.pkl``           – fitted UMAP model (all patches)
   - ``patch_sort/gt{x}pred{y}/``     – patches copied by true-class / predicted-class index;
@@ -833,7 +833,7 @@ def run_classification_pipeline(cfg: ClassificationConfig) -> dict:
     df_out.to_csv(str(cfg.out_dir / "classification_results.csv"), index=False)
 
     # ------------------------------------------------------------------
-    # 9. UMAP of ALL patches coloured by predicted FA type
+    # 9. UMAP of ALL patches coloured by predicted label
     # ------------------------------------------------------------------
     log.info("Step 9: UMAP of all patches coloured by predicted label …")
     try:
@@ -865,8 +865,23 @@ def run_classification_pipeline(cfg: ClassificationConfig) -> dict:
 
         X_all = df_all[feat_cols].values.astype(np.float32) * feat_scale
         log.info("  UMAP input shape: %s  (features: %s)", X_all.shape, feat_cols)
-        pred_all      = clf.predict(X_all)
+        pred_all       = clf.predict(X_all)
         pred_names_all = [id_to_label[p] for p in pred_all]
+        proba_all      = clf.predict_proba(X_all)
+
+        # Save predictions for ALL patches (labelled + unlabelled) so that
+        # the cross-classification visualisation pipeline can use them.
+        _all_out_cols = ["filename"]
+        for _c in ["condition_name", "group", "split"]:
+            if _c in df_all.columns:
+                _all_out_cols.append(_c)
+        if cfg.label_col in df_all.columns:
+            _all_out_cols.append(cfg.label_col)
+        df_preds_all = df_all[_all_out_cols].copy()
+        df_preds_all["pred_label"] = pred_names_all
+        df_preds_all["max_prob"]   = proba_all.max(axis=1)
+        df_preds_all.to_csv(str(cfg.out_dir / "predictions_all.csv"), index=False)
+        log.info("  Saved predictions_all.csv (%d rows)", len(df_preds_all))
 
         reducer_all = _UMAP(n_components=2, random_state=cfg.random_state)
         emb_all = reducer_all.fit_transform(X_all)
@@ -874,13 +889,21 @@ def run_classification_pipeline(cfg: ClassificationConfig) -> dict:
 
         # Load project colour map (falls back gracefully if import fails)
         try:
-            from subcellae.utils.label_colors import classification_label_to_color
-            color_map = classification_label_to_color
+            from subcellae.utils.label_colors import (
+                classification_label_to_color,
+                position_label_to_color,
+            )
+            _color_maps = {
+                "classification": classification_label_to_color,
+                "Position":       position_label_to_color,
+            }
+            color_map = _color_maps.get(cfg.label_col)
         except ImportError:
             color_map = None
 
+        _task_name   = cfg.label_col          # used in plot titles
         pred_arr_all = np.array(pred_names_all)
-        fa4_order    = label_order[:4]   # first 4 classes, mask out "No adhesion"
+        fa4_order    = label_order[:4]        # first 4 classes (e.g. mask out uncertain)
 
         # Compute axis limits from the full embedding with 5% padding
         _pad = 0.05
@@ -917,30 +940,30 @@ def run_classification_pipeline(cfg: ClassificationConfig) -> dict:
         # ── all patches, all classes ──────────────────────────────────────
         _plot_umap_predicted(
             emb_all, pred_names_all, label_order,
-            title="UMAP – all patches, predicted FA type",
+            title=f"UMAP – all patches, predicted {_task_name}",
             save_path=cfg.out_dir / "umap_predicted_all.png",
             label_to_color=color_map,
             xlim=xlim, ylim=ylim,
         )
-        # ── all patches, FA4 only ─────────────────────────────────────────
+        # ── all patches, top-4 classes only ──────────────────────────────
         _umap_subset(all_rows, fa4_mask,
-                     "UMAP – all patches, predicted FA type (FA4)",
+                     f"UMAP – all patches, predicted {_task_name} (top-4)",
                      cfg.out_dir / "umap_predicted_all_fa4.png")
         # ── control, all classes ──────────────────────────────────────────
         _umap_subset(ctrl_mask, all_classes,
-                     "UMAP – control, predicted FA type",
+                     f"UMAP – control, predicted {_task_name}",
                      cfg.out_dir / "umap_predicted_control.png")
-        # ── control, FA4 only ─────────────────────────────────────────────
+        # ── control, top-4 classes only ───────────────────────────────────
         _umap_subset(ctrl_mask, fa4_mask,
-                     "UMAP – control, predicted FA type (FA4)",
+                     f"UMAP – control, predicted {_task_name} (top-4)",
                      cfg.out_dir / "umap_predicted_control_fa4.png")
         # ── ycomp, all classes ────────────────────────────────────────────
         _umap_subset(ycomp_mask, all_classes,
-                     "UMAP – ycomp, predicted FA type",
+                     f"UMAP – ycomp, predicted {_task_name}",
                      cfg.out_dir / "umap_predicted_ycomp.png")
-        # ── ycomp, FA4 only ───────────────────────────────────────────────
+        # ── ycomp, top-4 classes only ─────────────────────────────────────
         _umap_subset(ycomp_mask, fa4_mask,
-                     "UMAP – ycomp, predicted FA type (FA4)",
+                     f"UMAP – ycomp, predicted {_task_name} (top-4)",
                      cfg.out_dir / "umap_predicted_ycomp_fa4.png")
 
         # ── true label — labelled patches only ────────────────────────────
@@ -952,7 +975,7 @@ def run_classification_pipeline(cfg: ClassificationConfig) -> dict:
                     emb_all[labelled_mask],
                     gt_names_all[labelled_mask].tolist(),
                     label_order,
-                    title="UMAP – labelled patches, true FA type",
+                    title=f"UMAP – labelled patches, true {_task_name}",
                     save_path=cfg.out_dir / "umap_true_label.png",
                     label_to_color=color_map,
                     xlim=xlim, ylim=ylim,

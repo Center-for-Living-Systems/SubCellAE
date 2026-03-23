@@ -173,6 +173,14 @@ class AEConfig:
     filename_col: str     = "crop_img_filename"  # column that holds patch basenames
     label_order: list     = None  # ordered list of string labels; None → auto alphabetical
 
+    # --- second annotation (dual SemiSup, e.g. Position) ---
+    annotation_file_2: str = ""      # same CSV is typical; leave "" to disable
+    label_col_2: str       = "Position"
+    filename_col_2: str    = "crop_img_filename"
+    label_order_2: list    = None
+    num_classes_2: int     = 0       # auto-set from label_order_2 if provided
+    lambda_cls_2: float    = 0.0     # 0.0 = single-label mode (backward-compat)
+
     # --- Contrastive-specific ---
     proj_dim: int          = 64
     noise_prob: float      = 0.05
@@ -320,15 +328,16 @@ def _extract_latents(model, loader, device: str, model_type: str) -> dict:
         ``recons``            – list of np.ndarray (H, W) float32
     """
     model.eval()
-    all_paths, all_conditions, all_ann_labels, all_latents = [], [], [], []
+    all_paths, all_conditions, all_ann_labels, all_ann_labels_2, all_latents = [], [], [], [], []
     all_raws, all_recons = [], []
 
     with torch.no_grad():
         for batch in loader:
-            x          = batch[0].to(device)    # (B, C, H, W)
-            conditions = batch[1]               # int tensor
-            ann_labels = batch[2]               # int tensor (-1 = unlabelled)
-            paths      = batch[3]               # list of str
+            x            = batch[0].to(device)  # (B, C, H, W)
+            conditions   = batch[1]             # int tensor
+            ann_labels   = batch[2]             # int tensor (-1 = unlabelled)
+            ann_labels_2 = batch[3]             # int tensor, second label or -1
+            paths        = batch[4]             # list of str
 
             if model_type == "ae":
                 x_hat, z = model(x)
@@ -343,6 +352,7 @@ def _extract_latents(model, loader, device: str, model_type: str) -> dict:
             all_paths.extend(paths)
             all_conditions.extend(conditions.tolist())
             all_ann_labels.extend(ann_labels.tolist())
+            all_ann_labels_2.extend(ann_labels_2.tolist())
             all_latents.append(z.cpu().numpy())
 
             # Store raw and recon as (H, W) float32 arrays
@@ -363,15 +373,16 @@ def _extract_latents(model, loader, device: str, model_type: str) -> dict:
         all_norm_mse.append(norm_mse)
 
     return {
-        "paths":             all_paths,
-        "conditions":        all_conditions,
-        "annotation_labels": all_ann_labels,
-        "latents":           np.concatenate(all_latents, axis=0),
-        "raws":              all_raws,
-        "recons":            all_recons,
-        "recon_mse":         all_mse,
-        "mean_intensity":    all_mean_intensity,
-        "norm_mse":          all_norm_mse,
+        "paths":               all_paths,
+        "conditions":          all_conditions,
+        "annotation_labels":   all_ann_labels,
+        "annotation_labels_2": all_ann_labels_2,
+        "latents":             np.concatenate(all_latents, axis=0),
+        "raws":                all_raws,
+        "recons":              all_recons,
+        "recon_mse":           all_mse,
+        "mean_intensity":      all_mean_intensity,
+        "norm_mse":            all_norm_mse,
     }
 
 
@@ -381,27 +392,34 @@ def _save_latent_csv(
     datasets: list,
     label_order: list,
     result_dir: Path,
+    label_order_2: list | None = None,
 ) -> Path:
     """Build and save the latent feature CSV.
 
     Columns
     -------
     filename, filepath, condition, condition_name, group,
-    split, z_0 … z_{d-1}, annotation_label, annotation_label_name
+    split, z_0 … z_{d-1},
+    annotation_label, annotation_label_name,
+    annotation_label_2, annotation_label_2_name  (when label_order_2 is given)
     """
     # condition → name mapping from loaded datasets
     cond_to_name = {}
     for ds in datasets:
         cond_to_name[ds.condition] = ds.condition_name
 
-    int_to_label = {i: lbl for i, lbl in enumerate(label_order)} if label_order else {}
+    int_to_label  = {i: lbl for i, lbl in enumerate(label_order)}  if label_order  else {}
+    int_to_label2 = {i: lbl for i, lbl in enumerate(label_order_2)} if label_order_2 else {}
+    has_label2    = bool(label_order_2)
 
     rows = []
     for split_name, result in [("train", train_result), ("val", val_result)]:
         latents = result["latents"]
+        ann2_list = result.get("annotation_labels_2", [-1] * len(result["paths"]))
         for i, path in enumerate(result["paths"]):
-            condition  = result["conditions"][i]
-            ann_int    = result["annotation_labels"][i]
+            condition = result["conditions"][i]
+            ann_int   = result["annotation_labels"][i]
+            ann_int2  = ann2_list[i]
             row = {
                 "filename":            Path(path).name,
                 "filepath":            path,
@@ -415,6 +433,9 @@ def _save_latent_csv(
                 "annotation_label":    ann_int,
                 "annotation_label_name": int_to_label.get(ann_int, ""),
             }
+            if has_label2:
+                row["annotation_label_2"]      = ann_int2
+                row["annotation_label_2_name"] = int_to_label2.get(ann_int2, "")
             for d, val in enumerate(latents[i]):
                 row[f"z_{d}"] = float(val)
             rows.append(row)
@@ -426,6 +447,8 @@ def _save_latent_csv(
                    "group", "split"]
     metric_cols = ["recon_mse", "mean_intensity", "norm_mse"]
     ann_cols    = ["annotation_label", "annotation_label_name"]
+    if has_label2:
+        ann_cols += ["annotation_label_2", "annotation_label_2_name"]
     df = pd.DataFrame(rows, columns=meta_cols + metric_cols + latent_cols + ann_cols)
 
     out_path = result_dir / "latents.csv"
@@ -604,8 +627,14 @@ def run_ae_pipeline(cfg: AEConfig):
         log.info("  [VAE] out_activation=%s  beta=%.3f  beta_anneal=%s  recon_type=%s",
                  cfg.out_activation, cfg.beta, cfg.beta_anneal, cfg.recon_type)
     elif cfg.model_type == "semisup":
-        log.info("  [SemiSup] num_classes=%d  lambda_recon=%.3f  lambda_cls=%.3f",
-                 cfg.num_classes, cfg.lambda_recon, cfg.lambda_cls)
+        if cfg.lambda_cls_2 > 0:
+            log.info("  [SemiSup dual] num_classes=%d  num_classes_2=%d  "
+                     "lambda_recon=%.3f  lambda_cls=%.3f  lambda_cls2=%.3f",
+                     cfg.num_classes, cfg.num_classes_2,
+                     cfg.lambda_recon, cfg.lambda_cls, cfg.lambda_cls_2)
+        else:
+            log.info("  [SemiSup] num_classes=%d  lambda_recon=%.3f  lambda_cls=%.3f",
+                     cfg.num_classes, cfg.lambda_recon, cfg.lambda_cls)
     elif cfg.model_type == "contrastive":
         log.info("  [Contrastive] proj_dim=%d  noise_prob=%.3f  temperature=%.3f  "
                  "lambda_contrast=%.3f",
@@ -634,18 +663,26 @@ def run_ae_pipeline(cfg: AEConfig):
             label_col=cfg.label_col,
             filename_col=cfg.filename_col,
             label_order=cfg.label_order,
+            annotation_file_2=cfg.annotation_file_2 or None,
+            label_col_2=cfg.label_col_2,
+            filename_col_2=cfg.filename_col_2,
+            label_order_2=cfg.label_order_2,
             transform=_channel_expand,
         )
         if cfg.annotation_file and ds.num_classes > 0:
             cfg.num_classes = ds.num_classes
             log.info("  Loaded %d patches from %s  condition=%d (%s)  "
-                     "annotation: %d classes via %r",
+                     "annotation1: %d classes via %r",
                      len(ds), path, condition, condition_name,
                      ds.num_classes, cfg.label_col)
-            log.info("  Label mapping: %s", ds.label_to_int)
+            log.info("  Label1 mapping: %s", ds.label_to_int)
         else:
             log.info("  Loaded %d patches from %s  condition=%d (%s)",
                      len(ds), path, condition, condition_name)
+        if cfg.annotation_file_2 and ds.num_classes_2 > 0:
+            cfg.num_classes_2 = ds.num_classes_2
+            log.info("  annotation2: %d classes via %r  mapping: %s",
+                     ds.num_classes_2, cfg.label_col_2, ds.label_to_int_2)
         datasets.append(ds)
 
     if not datasets:
@@ -725,6 +762,7 @@ def run_ae_pipeline(cfg: AEConfig):
             no_ch=cfg.no_ch,
             BN_flag=cfg.BN_flag,
             dropout_flag=cfg.dropout_flag,
+            num_classes_2=cfg.num_classes_2,
         )
 
     else:  # "contrastive"
@@ -778,6 +816,7 @@ def run_ae_pipeline(cfg: AEConfig):
             lambda_recon=cfg.lambda_recon,
             lambda_cls=cfg.lambda_cls,
             result_dir=result_dir_str,
+            lambda_cls2=cfg.lambda_cls_2,
         )
 
     else:  # "contrastive"
@@ -819,6 +858,7 @@ def run_ae_pipeline(cfg: AEConfig):
         datasets=datasets,
         label_order=datasets[0].label_order if datasets else [],
         result_dir=cfg.result_dir,
+        label_order_2=datasets[0].label_order_2 if (datasets and datasets[0].label_order_2) else None,
     )
     log.info("Latent CSV saved → %s  (%d rows)",
              csv_path, len(train_result["paths"]) + len(val_result["paths"]))

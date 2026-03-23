@@ -27,7 +27,7 @@ data:
 # Output
 # ---------------------------------------------------------------------------
 output:
-  result_dir : "/mnt/d/lding/CLS_GitHub/SubCellAE/results/ae_run/semisup"
+  result_dir : "/mnt/d/lding/CLS_GitHub/SubCellAE/results/ae_run/semisup_position"
   # Checkpoints, loss curve PNGs, and model_final.pt are written here.
 
 # ---------------------------------------------------------------------------
@@ -52,7 +52,12 @@ model:
   # -- SemiSup-specific (only used when model_type = "semisup") ------------
   num_classes  : 5             # inferred automatically from annotation; override if needed
   lambda_recon : 1.0           # weight on the reconstruction term
-  lambda_cls   : 1.0           # weight on the classification term
+  lambda_cls   : 0.0           # weight on the FA-type classification term
+
+  # Dual semi-sup: set lambda_cls_2 > 0 to also train the Position head.
+  # num_classes_2 is inferred from label_order_2; set to 0 to disable.
+  num_classes_2 : 4            # set to 5 (or leave 0 to auto-infer) when using dual labels
+  lambda_cls_2  : 1.0          # 0.0 = single-label mode (default / backward-compat)
 
   # -- Contrastive-specific (only used when model_type = "contrastive") ----
   # proj_dim        : 64         # projection-head output dim for NT-Xent loss
@@ -73,7 +78,7 @@ model:
 
 annotation:
   annotation_file : "/mnt/d/lding/FA/analysis_results/labelling/paxdata_paxpatch_batch1and2_combined_labels.csv"   # CSV or .xlsx
-  label_col       : "classification"               # or "position"
+  label_col       : "classification"               # primary label column (FA type)
   filename_col    : "unique_ID"                    # column that holds patch basenames
   label_order     :                                # defines class 0, 1, 2, ...
     - "Nascent Adhesion"
@@ -82,6 +87,18 @@ annotation:
     - "fibrillar adhesion"
     - "No adhesion"
   # If label_order is omitted (null), classes are sorted alphabetically.
+
+  # ---- second label (dual semi-sup) ----
+  # Set annotation_file_2 (same CSV is fine) and lambda_cls_2 > 0 in [model]
+  # to train with both FA-type and Position classification losses simultaneously.
+  annotation_file_2 : "/mnt/d/lding/FA/analysis_results/labelling/paxdata_paxpatch_batch1and2_combined_labels.csv"
+  label_col_2       : "Position"
+  filename_col_2    : "unique_ID"
+  label_order_2     :
+    - "Cell Protruding Edge"
+    - "Cell Periphery/other"
+    - "Lamella"
+    - "Cell Body"    
 
 # ---------------------------------------------------------------------------
 # Training

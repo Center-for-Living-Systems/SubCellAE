@@ -448,6 +448,7 @@ class SemiSupAE(nn.Module):
         no_ch: int = 1,
         BN_flag: bool = True,
         dropout_flag: bool = False,
+        num_classes_2: int = 0,
     ):
         super().__init__()
 
@@ -488,12 +489,23 @@ class SemiSupAE(nn.Module):
             nn.Sigmoid(),
         )
 
-        # ---------- classification head ----------
+        # ---------- classification head (primary) ----------
         self.classifier = nn.Sequential(
             nn.Linear(latent_dim, 64),
             nn.ReLU(),
             nn.Linear(64, num_classes),
         )
+
+        # ---------- classification head (secondary, optional) ----------
+        self.num_classes_2 = num_classes_2
+        if num_classes_2 > 0:
+            self.classifier2 = nn.Sequential(
+                nn.Linear(latent_dim, 64),
+                nn.ReLU(),
+                nn.Linear(64, num_classes_2),
+            )
+        else:
+            self.classifier2 = None
 
         self.final_size  = final_size
         self.num_classes = num_classes
@@ -510,6 +522,18 @@ class SemiSupAE(nn.Module):
         recon  = self.decode(z)
         logits = self.classifier(z)
         return recon, z, logits
+
+    def forward_dual(self, x: torch.Tensor):
+        """Forward pass returning logits for both classifier heads.
+
+        Only valid when the model was constructed with ``num_classes_2 > 0``.
+        Returns ``(recon, z, logits, logits2)``.
+        """
+        z       = self.encode(x)
+        recon   = self.decode(z)
+        logits  = self.classifier(z)
+        logits2 = self.classifier2(z)
+        return recon, z, logits, logits2
 
 
 def semisup_ae_loss(
@@ -544,9 +568,48 @@ def semisup_ae_loss(
     return total, recon_loss, cls_loss
 
 
+def semisup_ae_loss_dual(
+    x: torch.Tensor,
+    recon: torch.Tensor,
+    logits: torch.Tensor,
+    labels: torch.Tensor,    # -1 = unlabelled
+    logits2: torch.Tensor,
+    labels2: torch.Tensor,   # -1 = unlabelled
+    lambda_recon: float = 1.0,
+    lambda_cls: float   = 1.0,
+    lambda_cls2: float  = 1.0,
+):
+    """Combined reconstruction + dual classification loss.
+
+    Identical to :func:`semisup_ae_loss` but adds a second CE term for a
+    second set of labels (e.g. Position).  Each CE term is computed only on
+    the patches that carry that label.
+
+    Returns
+    -------
+    total_loss, recon_loss, cls_loss, cls_loss2
+    """
+    recon_loss = F.mse_loss(recon, x, reduction="mean")
+
+    mask1 = labels >= 0
+    cls_loss = (
+        F.cross_entropy(logits[mask1], labels[mask1], reduction="mean")
+        if mask1.any() else torch.tensor(0.0, device=x.device)
+    )
+
+    mask2 = labels2 >= 0
+    cls_loss2 = (
+        F.cross_entropy(logits2[mask2], labels2[mask2], reduction="mean")
+        if mask2.any() else torch.tensor(0.0, device=x.device)
+    )
+
+    total = lambda_recon * recon_loss + lambda_cls * cls_loss + lambda_cls2 * cls_loss2
+    return total, recon_loss, cls_loss, cls_loss2
+
+
 def train_semisup_ae(
     model,
-    train_loader,    # yields (x, label, ...)   label=-1 for unlabelled
+    train_loader,    # yields (x, condition, label, label2, path)  label=-1 = unlabelled
     val_loader,
     device,
     epochs,
@@ -554,77 +617,117 @@ def train_semisup_ae(
     lambda_recon,
     lambda_cls,
     result_dir,
+    lambda_cls2: float = 0.0,   # >0 activates the second classification head
 ):
     """
     Training loop for SemiSupAE.
 
-    The dataloader must return (x, label, ...) where label is an integer
-    class index, or -1 for unlabelled samples.
+    The dataloader must return ``(x, condition, label, label2, path)`` where
+    each label is an integer class index, or ``-1`` for unlabelled samples.
+
+    When ``lambda_cls2 > 0`` and the model has a second head (``model.classifier2``),
+    the dual loss :func:`semisup_ae_loss_dual` is used, incorporating both
+    FA-type and Position labels simultaneously.
     """
+    dual_mode = lambda_cls2 > 0 and getattr(model, "classifier2", None) is not None
+
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     train_losses, val_losses   = [], []
     train_recon, train_cls     = [], []
     val_recon,   val_cls       = [], []
+    train_cls2,  val_cls2      = [], []
 
     error_print_period = max(1, epochs // 50)
     recon_view_period  = max(1, epochs // 10)
 
     for epoch in range(epochs):
         model.train()
-        tl = tr = tc = 0.0
+        tl = tr = tc = tc2 = 0.0
         for batch in train_loader:
             x      = batch[0].to(device)
-            # batch[1] = condition, batch[2] = annotation_label (-1 = unlabelled)
-            labels = batch[2].to(device) if len(batch) > 2 else batch[1].to(device)
+            labels = batch[2].to(device)
 
-            recon, _, logits = model(x)
-            loss, rl, cl = semisup_ae_loss(
-                x, recon, logits, labels,
-                lambda_recon=lambda_recon, lambda_cls=lambda_cls,
-            )
-            optimizer.zero_grad(); loss.backward(); optimizer.step()
-            tl += loss.item(); tr += rl.item(); tc += cl.item()
-
-        n = len(train_loader)
-        tl /= n; tr /= n; tc /= n
-        train_losses.append(tl); train_recon.append(tr); train_cls.append(tc)
-
-        model.eval()
-        vl = vr = vc = 0.0
-        correct = total_labelled = 0
-        with torch.no_grad():
-            for batch in val_loader:
-                x      = batch[0].to(device)
-                labels = batch[2].to(device) if len(batch) > 2 else batch[1].to(device)
-
+            if dual_mode:
+                labels2 = batch[3].to(device)
+                recon, _, logits, logits2 = model.forward_dual(x)
+                loss, rl, cl, cl2 = semisup_ae_loss_dual(
+                    x, recon, logits, labels, logits2, labels2,
+                    lambda_recon=lambda_recon,
+                    lambda_cls=lambda_cls,
+                    lambda_cls2=lambda_cls2,
+                )
+            else:
                 recon, _, logits = model(x)
                 loss, rl, cl = semisup_ae_loss(
                     x, recon, logits, labels,
                     lambda_recon=lambda_recon, lambda_cls=lambda_cls,
                 )
-                vl += loss.item(); vr += rl.item(); vc += cl.item()
+                cl2 = 0.0
 
-                # classification accuracy on labelled val samples
+            optimizer.zero_grad(); loss.backward(); optimizer.step()
+            tl += loss.item(); tr += rl.item(); tc += cl.item() if hasattr(cl, "item") else cl
+            tc2 += cl2.item() if hasattr(cl2, "item") else cl2
+
+        n = len(train_loader)
+        tl /= n; tr /= n; tc /= n; tc2 /= n
+        train_losses.append(tl); train_recon.append(tr)
+        train_cls.append(tc);    train_cls2.append(tc2)
+
+        model.eval()
+        vl = vr = vc = vc2 = 0.0
+        correct = total_labelled = 0
+        correct2 = total_labelled2 = 0
+        with torch.no_grad():
+            for batch in val_loader:
+                x      = batch[0].to(device)
+                labels = batch[2].to(device)
+
+                if dual_mode:
+                    labels2 = batch[3].to(device)
+                    recon, _, logits, logits2 = model.forward_dual(x)
+                    loss, rl, cl, cl2 = semisup_ae_loss_dual(
+                        x, recon, logits, labels, logits2, labels2,
+                        lambda_recon=lambda_recon,
+                        lambda_cls=lambda_cls,
+                        lambda_cls2=lambda_cls2,
+                    )
+                    mask2 = labels2 >= 0
+                    if mask2.any():
+                        correct2        += (logits2[mask2].argmax(1) == labels2[mask2]).sum().item()
+                        total_labelled2 += mask2.sum().item()
+                else:
+                    recon, _, logits = model(x)
+                    loss, rl, cl = semisup_ae_loss(
+                        x, recon, logits, labels,
+                        lambda_recon=lambda_recon, lambda_cls=lambda_cls,
+                    )
+                    cl2 = 0.0
+
+                vl += loss.item(); vr += rl.item(); vc += cl.item() if hasattr(cl, "item") else cl
+                vc2 += cl2.item() if hasattr(cl2, "item") else cl2
+
                 mask = labels >= 0
                 if mask.any():
-                    preds = logits[mask].argmax(dim=1)
-                    correct        += (preds == labels[mask]).sum().item()
+                    correct        += (logits[mask].argmax(1) == labels[mask]).sum().item()
                     total_labelled += mask.sum().item()
 
         n = len(val_loader)
-        vl /= n; vr /= n; vc /= n
-        val_losses.append(vl); val_recon.append(vr); val_cls.append(vc)
+        vl /= n; vr /= n; vc /= n; vc2 /= n
+        val_losses.append(vl); val_recon.append(vr)
+        val_cls.append(vc);    val_cls2.append(vc2)
 
         acc_str = ""
         if total_labelled > 0:
-            acc = 100.0 * correct / total_labelled
-            acc_str = f"  val_acc={acc:.1f}%"
+            acc_str += f"  val_acc1={100.*correct/total_labelled:.1f}%"
+        if total_labelled2 > 0:
+            acc_str += f"  val_acc2={100.*correct2/total_labelled2:.1f}%"
 
         if (epoch + 1) % error_print_period == 0:
+            cls2_str = f" cls2={tc2:.4f}/{vc2:.4f}" if dual_mode else ""
             print(
                 f"SemiSup  epoch {epoch+1}/{epochs} | "
-                f"train total={tl:.4f} recon={tr:.4f} cls={tc:.4f} | "
+                f"train total={tl:.4f} recon={tr:.4f} cls={tc:.4f}{cls2_str.replace('/', ' | val cls2=')} | "
                 f"val   total={vl:.4f} recon={vr:.4f} cls={vc:.4f}{acc_str}"
             )
 
@@ -634,11 +737,14 @@ def train_semisup_ae(
             plt.close(fig)
             torch.save(model, os.path.join(result_dir, f"semisup_model_ep{epoch+1}.pt"))
 
-    for name, arr in [
+    save_arrays = [
         ("ss_train_total", train_losses), ("ss_val_total", val_losses),
         ("ss_train_recon", train_recon),  ("ss_val_recon", val_recon),
         ("ss_train_cls",   train_cls),    ("ss_val_cls",   val_cls),
-    ]:
+    ]
+    if dual_mode:
+        save_arrays += [("ss_train_cls2", train_cls2), ("ss_val_cls2", val_cls2)]
+    for name, arr in save_arrays:
         joblib.dump(arr, os.path.join(result_dir, f"{name}.pkl"))
 
     _save_loss_curves(train_losses, val_losses, epochs,

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 from pathlib import Path
 
 try:
@@ -141,6 +142,11 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     run_analysis_pipeline(cfg)
+
+    # Copy config to the output directory for reproducibility
+    cfg.out_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(args.config, cfg.out_dir / Path(args.config).name)
+    log.info("Config copied to: %s", cfg.out_dir)
     log.info("Done.")
 
 

@@ -3,20 +3,23 @@ dataset.py
 ==========
 PyTorch Dataset classes for .tif patch files.
 
-The primary class is :class:`PatchDataset`, which always returns a 4-tuple::
+The primary class is :class:`PatchDataset`, which always returns a 5-tuple::
 
-    (image, condition, annotation_label, path)
+    (image, condition, annotation_label, annotation_label_2, path)
 
 where:
 
-* ``image``            – (1, H, W) float32 tensor, values in [0, 1]
-* ``condition``        – integer condition ID for the whole directory
-                         (e.g. 0 = control, 1 = ycomp).  Used to distinguish
-                         experimental groups; ignored by plain AE/VAE training.
-* ``annotation_label`` – per-patch integer class from an optional annotation
-                         file (e.g. FA type: 0–4), or ``-1`` if the patch was
-                         not annotated.  Used by :func:`semisup_ae_loss`.
-* ``path``             – absolute path to the .tif file (str).
+* ``image``              – (1, H, W) float32 tensor, values in [0, 1]
+* ``condition``          – integer condition ID for the whole directory
+                           (e.g. 0 = control, 1 = ycomp).  Used to distinguish
+                           experimental groups; ignored by plain AE/VAE training.
+* ``annotation_label``   – per-patch integer class from the primary annotation
+                           file (e.g. FA type: 0–4), or ``-1`` if unlabelled.
+                           Used by :func:`semisup_ae_loss`.
+* ``annotation_label_2`` – per-patch integer class from an optional second
+                           annotation file (e.g. Position: 0–4), or ``-1``.
+                           Used by :func:`semisup_ae_loss_dual`.
+* ``path``               – absolute path to the .tif file (str).
 
 :class:`TIFFDataset` is kept as a backward-compatible wrapper that returns the
 old 3-tuple ``(image, condition, path)`` (``label`` is now called
@@ -100,6 +103,10 @@ class PatchDataset(Dataset):
         label_col: str = "Classification",
         filename_col: str = "crop_img_filename",
         label_order: list | None = None,
+        annotation_file_2: str | None = None,
+        label_col_2: str = "Position",
+        filename_col_2: str = "crop_img_filename",
+        label_order_2: list | None = None,
         transform=None,
     ):
         self.root_dir       = root_dir
@@ -107,37 +114,29 @@ class PatchDataset(Dataset):
         self.condition_name = condition_name or str(condition)
         self.transform      = transform
 
-        # ---- build annotation lookup (filename → int label) ----
-        fname_to_annotation: dict[str, int] = {}
-        self.label_order   = label_order or []
-        self.label_to_int: dict[str, int] = {}
-        self.num_classes   = 0
-
-        if annotation_file:
-            ann_path = Path(annotation_file)
+        # ---- helper: load one annotation file → {filename: int} ----
+        def _load_annotations(ann_file, col, fname_col, order):
+            if not ann_file:
+                return {}, order or [], {}, 0
+            ann_path = Path(ann_file)
             ann_df   = (pd.read_excel(ann_path)
                         if ann_path.suffix.lower() in {".xlsx", ".xls"}
                         else pd.read_csv(ann_path))
+            ann_df[fname_col] = ann_df[fname_col].astype(str).apply(lambda p: Path(p).name)
+            fname_to_str = dict(zip(ann_df[fname_col], ann_df[col].astype(str)))
+            if not order:
+                order = sorted({v for v in fname_to_str.values() if v and v != "nan"})
+            lbl_to_int = {lbl: i for i, lbl in enumerate(order)}
+            fname_to_int = {f: lbl_to_int.get(s, -1) for f, s in fname_to_str.items()}
+            return fname_to_int, order, lbl_to_int, len(order)
 
-            # normalise filename column to basename
-            ann_df[filename_col] = (
-                ann_df[filename_col].astype(str).apply(lambda p: Path(p).name)
-            )
-            fname_to_str = dict(
-                zip(ann_df[filename_col], ann_df[label_col].astype(str))
-            )
+        # ---- primary annotation ----
+        fname_to_ann1, self.label_order, self.label_to_int, self.num_classes = \
+            _load_annotations(annotation_file, label_col, filename_col, label_order or [])
 
-            if not self.label_order:
-                self.label_order = sorted(
-                    {v for v in fname_to_str.values() if v and v != "nan"}
-                )
-            self.label_to_int = {lbl: i for i, lbl in enumerate(self.label_order)}
-            self.num_classes  = len(self.label_order)
-
-            fname_to_annotation = {
-                fname: self.label_to_int.get(str_lbl, -1)
-                for fname, str_lbl in fname_to_str.items()
-            }
+        # ---- secondary annotation ----
+        fname_to_ann2, self.label_order_2, self.label_to_int_2, self.num_classes_2 = \
+            _load_annotations(annotation_file_2, label_col_2, filename_col_2, label_order_2 or [])
 
         # ---- load images ----
         all_paths = sorted([
@@ -146,9 +145,10 @@ class PatchDataset(Dataset):
             if fname.lower().endswith(("tif", "tiff"))
         ])
 
-        self.data              = []
-        self.paths             = []
-        self.annotation_labels = []
+        self.data                = []
+        self.paths               = []
+        self.annotation_labels   = []
+        self.annotation_labels_2 = []
 
         for img_path in all_paths:
             try:
@@ -160,20 +160,22 @@ class PatchDataset(Dataset):
                 print(f"Warning: Skipping unreadable image {img_path} – {e}")
                 continue
 
-            ann_label = fname_to_annotation.get(
-                _patch_name_to_annotation_key(img_path), -1
-            )
-
+            key = _patch_name_to_annotation_key(img_path)
             self.data.append(image)
             self.paths.append(img_path)
-            self.annotation_labels.append(ann_label)
+            self.annotation_labels.append(fname_to_ann1.get(key, -1))
+            self.annotation_labels_2.append(fname_to_ann2.get(key, -1))
 
-        n_ann = sum(1 for l in self.annotation_labels if l >= 0)
+        n_ann  = sum(1 for l in self.annotation_labels   if l >= 0)
+        n_ann2 = sum(1 for l in self.annotation_labels_2 if l >= 0)
+        ann_info = ""
+        if annotation_file:
+            ann_info += f"  label1={label_col}: {n_ann} annotated"
+        if annotation_file_2:
+            ann_info += f"  label2={label_col_2}: {n_ann2} annotated"
         print(
             f"PatchDataset [{self.condition_name}]: {len(self.data)} patches, "
-            f"condition={condition}, "
-            f"{n_ann} annotated / {len(self.data) - n_ann} unlabelled"
-            + (f" ({label_col})" if annotation_file else "")
+            f"condition={condition},{ann_info or ' (unlabelled)'}"
         )
 
     def __len__(self) -> int:
@@ -184,6 +186,7 @@ class PatchDataset(Dataset):
             self.data[idx],
             self.condition,
             self.annotation_labels[idx],
+            self.annotation_labels_2[idx],
             self.paths[idx],
         )
 
@@ -208,7 +211,7 @@ class TIFFDataset(Dataset):
         return len(self._ds)
 
     def __getitem__(self, idx):
-        image, condition, _, path = self._ds[idx]
+        image, condition, _, _, path = self._ds[idx]
         return image, condition, path
 
 
@@ -245,5 +248,5 @@ class AnnotatedTIFFDataset(Dataset):
         return len(self._ds)
 
     def __getitem__(self, idx):
-        image, _, annotation_label, path = self._ds[idx]
+        image, _, annotation_label, _, path = self._ds[idx]
         return image, annotation_label, path
