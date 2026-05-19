@@ -16,8 +16,8 @@
 
 set -euo pipefail
 
-export PYTHONPATH="/home/lding/lding/gitcode/SubCellAE-contrastive"
-PYTHON="python"
+export PYTHONPATH="/net/projects/CLS/lding/gitcode/SubCellAE_contrastive_projector"
+PYTHON="/home/liyading/miniconda3/envs/subcellae-cuda/bin/python"
 CFG="config/contrastive_config"
 
 mkdir -p logs

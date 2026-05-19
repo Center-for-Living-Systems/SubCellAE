@@ -1,7 +1,7 @@
 # =============================================================================
 # Analysis: contrastive AE, CIO-RB, vinc dataset, latent_dim=12, proj_dim=8
 # =============================================================================
-root_folder : "/home/lding/lding/fa_data_analysis"
+root_folder : "/net/projects/CLS/lding/data/fa_data_analysis"
 
 input:
   latents_csv  : root_folder + "/ae_results/contrastive_run/contrastive_cio_rb_vinc_lat12proj8/latents.csv"
