@@ -766,6 +766,7 @@ def train_semisup_ae(
     early_stopping_patience: int = 0,    # 0 = disabled; stop when val doesn't improve
     min_epochs_for_best: int = 200,      # ignore best-checkpoint tracking before this epoch
     warmup_epochs: int = 200,            # epochs of recon-only before adding cls loss
+    lr_scheduler_patience: int = 10,     # ReduceLROnPlateau patience; 0 = no scheduler
 ):
     """
     Training loop for SemiSupAE.
@@ -802,9 +803,14 @@ def train_semisup_ae(
     dual_mode = lambda_cls2 > 0 and getattr(model, "classifier2", None) is not None
 
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=10, min_lr=1e-6,
-    )
+    def _make_semisup_scheduler():
+        if lr_scheduler_patience <= 0:
+            return None
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5,
+            patience=lr_scheduler_patience, min_lr=1e-6,
+        )
+    scheduler = _make_semisup_scheduler()
 
     train_losses, val_losses   = [], []
     train_recon, train_cls     = [], []
@@ -909,16 +915,15 @@ def train_semisup_ae(
         # LR scheduler: skip during warmup so recon plateau doesn't drain the LR.
         # At the warmup→phase-2 transition, reset LR to the original value so the
         # classifier head can actually learn.
-        if not in_warmup:
+        if not in_warmup and scheduler is not None:
             scheduler.step(vl)
         elif epoch + 1 == warmup_epochs:
-            # First epoch of phase 2: reset LR and scheduler state
+            # First epoch of phase 2: reset LR and restart scheduler
             for pg in optimizer.param_groups:
                 pg["lr"] = lr
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode="min", factor=0.5, patience=10, min_lr=1e-6,
-            )
-            print(f"SemiSup  warmup complete — LR reset to {lr:.2e}, scheduler restarted")
+            scheduler = _make_semisup_scheduler()
+            print(f"SemiSup  warmup complete — LR reset to {lr:.2e}"
+                  + (", scheduler restarted" if scheduler is not None else ", no scheduler"))
         current_lr = optimizer.param_groups[0]["lr"]
 
         # Best-checkpoint tracking (only after min_epochs_for_best) and early stopping

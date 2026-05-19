@@ -40,11 +40,12 @@ training:
   val_split               : 0.2
   loss_norm_flag          : false
   group_split             : true
-  weight_decay            : 0.0       # no L2 regularisation
-  warmup_epochs           : 0         # no warmup — cls loss active from epoch 1
-  early_stopping_patience : 0         # run all epochs, use final model
-  min_epochs_for_best     : 0
-  lr_scheduler            : "none"
+  weight_decay                  : 0.0   # no L2 regularisation
+  warmup_epochs                 : 0     # no warmup — cls loss active from epoch 1
+  early_stopping_patience       : 0     # run all epochs, use final model
+  min_epochs_for_best           : 0     # no checkpoint restoration — use final model
+  lr_scheduler                  : "none"
+  semisup_lr_scheduler_patience : 0     # no ReduceLROnPlateau — fixed LR throughout
 
 annotation:
   annotation_file : root_folder + "/labelling/paxdata_paxpatch_batch1and2_combined_labels.csv"

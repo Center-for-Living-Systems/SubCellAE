@@ -210,6 +210,7 @@ class AEConfig:
     early_stopping_patience: int = 0      # 0 = disabled
     min_epochs_for_best: int     = 200    # best-checkpoint tracking starts at this epoch
     warmup_epochs: int           = 200    # recon-only phase before adding cls loss
+    semisup_lr_scheduler_patience: int = 10  # semisup ReduceLROnPlateau patience; 0 = disabled
 
     # --- reconstruction output ---
     save_recon: bool       = True   # whether to write reconstruction images
@@ -997,6 +998,7 @@ def run_ae_pipeline(cfg: AEConfig):
             early_stopping_patience=cfg.early_stopping_patience,
             min_epochs_for_best=cfg.min_epochs_for_best,
             warmup_epochs=cfg.warmup_epochs,
+            lr_scheduler_patience=cfg.semisup_lr_scheduler_patience,
         )
 
     elif cfg.model_type == "contrastive":
