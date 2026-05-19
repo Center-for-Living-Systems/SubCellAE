@@ -1,12 +1,12 @@
 # Visualization: strategy: 0322 | features: lat8
 input:
-  latents_csv          : "/home/lding/lding/fa_data_analysis/ae_results/strategy_sweep/strategy_0322/semisup_both/latents.csv"
-  fa_type_results_csv  : "/home/lding/lding/fa_data_analysis/ae_results/strategy_sweep/strategy_0322/semisup_both/fa_cls_lat8/predictions_all.csv"
-  position_results_csv : "/home/lding/lding/fa_data_analysis/ae_results/strategy_sweep/strategy_0322/semisup_both/pos_cls_lat8/predictions_all.csv"
-  umap_model_pkl       : "/home/lding/lding/fa_data_analysis/ae_results/strategy_sweep/strategy_0322/semisup_both/fa_cls_lat8/umap_all_model.pkl"
+  latents_csv          : "/net/projects/CLS/lding/data/fa_data_analysis/ae_results/strategy_sweep/strategy_0322/semisup_both/latents.csv"
+  fa_type_results_csv  : "/net/projects/CLS/lding/data/fa_data_analysis/ae_results/strategy_sweep/strategy_0322/semisup_both/fa_cls_lat8_from_csv/predictions_all.csv"
+  position_results_csv : "/net/projects/CLS/lding/data/fa_data_analysis/ae_results/strategy_sweep/strategy_0322/semisup_both/pos_cls_lat8_from_csv/predictions_all.csv"
+  umap_model_pkl       : "/net/projects/CLS/lding/data/fa_data_analysis/ae_results/strategy_sweep/strategy_0322/semisup_both/fa_cls_lat8_from_csv/umap_all_model.pkl"
 
 output:
-  out_dir : "/home/lding/lding/fa_data_analysis/ae_results/strategy_sweep/strategy_0322/semisup_both/vis_lat8"
+  out_dir : "/net/projects/CLS/lding/data/fa_data_analysis/ae_results/strategy_sweep/strategy_0322/semisup_both/vis_lat8"
 
 labels:
   fa_type_label_col  : "classification"
