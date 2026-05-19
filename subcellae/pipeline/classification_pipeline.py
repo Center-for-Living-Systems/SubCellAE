@@ -54,24 +54,14 @@ from sklearn.model_selection import StratifiedKFold, train_test_split
 
 log = logging.getLogger(__name__)
 
-# Matches the coordinate block that starts with _f<digits>x… or -f<digits>x…
-# Used to normalise latents filenames to label-CSV (unique_ID) style.
-# latents : control_f0001x0112y0496ps32.tif   (underscore before f)
-# label   : control-f0001x0112y0496ps32.tif   (hyphen   before f)
+# Matches the coordinate block f<digits>x…  preceded by an underscore.
+# Both pax and vinc patch filenames use underscore: control_f0001x…
+# Both label CSVs store unique_ID with hyphen:      control-f0001x…
 _UNDERSCORE_F = re.compile(r'_(f\d+x\d+y\d+ps\d+\.tiff?)$', re.IGNORECASE)
 
 
 def _to_unique_id(filename: str) -> str:
-    """Convert a latents filename to the label-CSV unique_ID style.
-
-    Replaces the underscore immediately before the coordinate block
-    ``f{N}x{X}y{Y}ps{P}.tif`` with a hyphen so it matches unique_ID values
-    in the label CSV.
-
-    Example::
-
-        control_f0001x0112y0496ps32.tif  →  control-f0001x0112y0496ps32.tif
-    """
+    """Normalise a latents filename to label-CSV unique_ID style (underscore→hyphen)."""
     return _UNDERSCORE_F.sub(r'-\1', Path(filename).name)
 
 
