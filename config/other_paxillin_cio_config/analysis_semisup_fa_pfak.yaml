@@ -1,6 +1,6 @@
 # Analysis (cio): semisup_fa | dataset: pfak
 # MODEL_RUN is substituted at runtime by run_other_paxillin_cio.sh
-root_folder : "/home/lding/lding/fa_data_analysis"
+root_folder : "/net/projects/CLS/lding/data/fa_data_analysis"
 input:
   latents_csv  : root_folder + "/ae_results/other_paxillin_cio/MODEL_RUN/semisup_fa/pfak/latents_newdata.csv"
   split_filter : "all"

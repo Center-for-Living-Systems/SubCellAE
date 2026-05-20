@@ -1,11 +1,11 @@
 # Dataset: vinc (20250311 – Vinculin/rb647 + paxillin/m568)  |  condition: ycomp
 # Normalization: cell_insideoutside  (same as training data)
 paths:
-  root_folder      : "/home/lding/lding/fa_data_analysis"
+  root_folder      : "/net/projects/CLS/lding/data/fa_data_analysis"
   image_folder     : root_folder + "/fa_data/other_paxillin/20250311_eGFPZyxin488_Phalloidin405_Vinculin(rb)647_paxillin(m)568/Ycomp"
   cell_mask_folder : null
-  patch_output_dir : root_folder + "/ae_results/patches/cio/vinc/ycomp/tiff_patches32"
-  plot_output_dir  : root_folder + "/ae_results/patches/cio/vinc/ycomp/plot_patches32"
+  patch_output_dir : root_folder + "/ae_results/pax_ch_patch/cio_rb/vinc/ycomp/tiff_patches32"
+  plot_output_dir  : root_folder + "/ae_results/pax_ch_patch/cio_rb/vinc/ycomp/plot_patches32"
 experiment:
   condition : "ycomp"
   major_ch  : 1
