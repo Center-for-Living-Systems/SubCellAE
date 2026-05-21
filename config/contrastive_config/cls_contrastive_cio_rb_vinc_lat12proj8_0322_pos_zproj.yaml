@@ -1,10 +1,10 @@
 root_folder : "/net/projects/CLS/lding/data/fa_data_analysis"
 
 input:
-  latents_csv : root_folder + "/ae_results/contrastive_run/contrastive_cio_rb_vinc_lat12proj8/latents.csv"
+  latents_csv : root_folder + "/ae_results/contrastive_run/contrastive_cio_rb_vinc_lat12proj8_0322/latents.csv"
 
 output:
-  out_dir : root_folder + "/ae_results/contrastive_run/contrastive_cio_rb_vinc_lat12proj8/pos_cls_zproj"
+  out_dir : root_folder + "/ae_results/contrastive_run/contrastive_cio_rb_vinc_lat12proj8_0322/pos_cls_zproj"
 
 labels:
   label_col    : "Position"

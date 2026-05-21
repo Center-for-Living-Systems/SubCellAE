@@ -1,27 +1,29 @@
 root_folder : "/net/projects/CLS/lding/data/fa_data_analysis"
 
 input:
-  latents_csv : root_folder + "/ae_results/contrastive_run/contrastive_cio_rb_vinc_lat12proj8/latents.csv"
+  latents_csv : root_folder + "/ae_results/contrastive_run/contrastive_cio_rb_vinc_lat12proj8_0322/latents.csv"
 
 output:
-  out_dir : root_folder + "/ae_results/contrastive_run/contrastive_cio_rb_vinc_lat12proj8/pos_cls_zproj"
+  out_dir : root_folder + "/ae_results/contrastive_run/contrastive_cio_rb_vinc_lat12proj8_0322/fa_cls_zrecon"
 
 labels:
-  label_col    : "Position"
+  label_col    : "classification"
   label_csv    : "/net/projects/CLS/lding/data/fa_data_analysis/labelling/labels_vinc_20260521.csv"
   filename_col : "unique_ID"
   label_order  :
-    - "Cell Protruding Edge"
-    - "Cell Periphery/other"
-    - "Lamella"
-    - "Cell Body"
+    - "Nascent Adhesion"
+    - "focal complex"
+    - "focal adhesion"
+    - "fibrillar adhesion"
+    - "No adhesion"
   exclude_labels:
-    - "No Category/uncertain"
-  metrics_exclude_labels: null
+    - "Uncertain"
+  metrics_exclude_labels: 
+    - "No adhesion"
 
 features:
   feature_cols   : null
-  feature_prefix : "p_"
+  feature_prefix : "z_"
   include_mean_intensity: false
 
 split:
