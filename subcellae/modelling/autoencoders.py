@@ -47,7 +47,11 @@ def normalized_mse(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
 
 def salt_and_pepper_noise(x: torch.Tensor, noise_prob: float = 0.05) -> torch.Tensor:
     """
-    Apply salt-and-pepper noise to a batch of images.
+    Apply soft salt-and-pepper noise to a batch of images.
+
+    Unlike hard salt/pepper (0 and 1), corrupted pixels are set to
+    mean ± std/3 per image, keeping noise intensity close to the local
+    signal level so bright spots don't mimic nascent adhesions.
 
     Parameters
     ----------
@@ -55,9 +59,18 @@ def salt_and_pepper_noise(x: torch.Tensor, noise_prob: float = 0.05) -> torch.Te
     noise_prob : probability that any given pixel is corrupted
     """
     noisy = x.clone()
+    # Per-image mean and std, broadcast over (C, H, W)
+    mean = x.mean(dim=(-3, -2, -1), keepdim=True)   # (B, 1, 1, 1)
+    std  = x.std(dim=(-3, -2, -1), keepdim=True).clamp(min=1e-6)
+    salt_val   = (mean + std / 3.0).clamp(0.0, 1.0)
+    pepper_val = (mean - std / 3.0).clamp(0.0, 1.0)
+
     mask = torch.rand_like(x)
-    noisy[mask < noise_prob / 2] = 0.0          # pepper
-    noisy[(mask >= noise_prob / 2) & (mask < noise_prob)] = 1.0  # salt
+    pepper_mask = mask < noise_prob / 2
+    salt_mask   = (mask >= noise_prob / 2) & (mask < noise_prob)
+
+    noisy[pepper_mask] = pepper_val.expand_as(noisy)[pepper_mask]
+    noisy[salt_mask]   = salt_val.expand_as(noisy)[salt_mask]
     return noisy
 
 
