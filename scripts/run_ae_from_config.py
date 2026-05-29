@@ -125,6 +125,11 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
     _isr                  = _get("model", "intensity_scale_range", [0.8, 1.2])
     intensity_scale_range = tuple(float(v) for v in _isr)
 
+    # Optional class-pair weight matrix (weighted SupCon)
+    _pw = _get("model", "pair_weights", None)
+    pair_weights         = _pw.get("matrix")   if _pw else None   # list-of-lists
+    pair_weights_classes = _pw.get("classes")  if _pw else None   # list of class names
+
     # ---- training ----
     epochs         = int(_get("training",   "epochs",         200))
     lr             = float(_get("training", "lr",             1e-3))
@@ -199,6 +204,8 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
         label_order_2=label_order_2,
         num_classes_2=num_classes_2,
         lambda_cls_2=lambda_cls_2,
+        pair_weights=pair_weights,
+        pair_weights_classes=pair_weights_classes,
     )
 
 

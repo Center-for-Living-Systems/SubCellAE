@@ -191,6 +191,13 @@ class AEConfig:
     use_flip: bool                 = True         # random H/V flips in augmentation
     intensity_scale_range: tuple   = (0.8, 1.2)  # (low, high) intensity multiplier
 
+    # Optional K×K class-pair weight matrix for weighted SupCon loss.
+    # Specify as a list-of-lists in YAML under model.pair_weights.matrix,
+    # with model.pair_weights.classes listing the label_order to fix row/col order.
+    # If absent, standard binary SupCon is used.
+    pair_weights: list | None      = None         # raw nested list from YAML
+    pair_weights_classes: list | None = None      # class name order for the matrix
+
     # --- training ---
     epochs: int         = 200
     lr: float           = 1e-3
@@ -1016,6 +1023,16 @@ def run_ae_pipeline(cfg: AEConfig):
         )
 
     else:  # "supcon"
+        # Build pair-weight tensor if configured
+        pw_tensor = None
+        if cfg.pair_weights is not None:
+            import torch as _torch
+            pw_tensor = _torch.tensor(cfg.pair_weights, dtype=_torch.float32)
+            if cfg.pair_weights_classes:
+                log.info("  [SupCon] weighted pair matrix — classes: %s",
+                         cfg.pair_weights_classes)
+            log.info("  [SupCon] pair_weights:\n%s", pw_tensor)
+
         model, _, _ = train_supervised_contrastive_ae(
             model, train_loader, val_loader,
             device=cfg.device,
@@ -1027,6 +1044,7 @@ def run_ae_pipeline(cfg: AEConfig):
             noise_prob=cfg.noise_prob,
             temperature=cfg.temperature,
             use_flip=cfg.use_flip,
+            pair_weights=pw_tensor,
         )
 
     # ------------------------------------------------------------------

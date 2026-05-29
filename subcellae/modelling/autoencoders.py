@@ -1133,9 +1133,11 @@ def supcon_loss(
     z: torch.Tensor,
     labels: torch.Tensor,
     temperature: float = 0.5,
+    pair_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
-    Hybrid Supervised Contrastive loss (SupCon-style).
+    Hybrid Supervised Contrastive loss (SupCon-style), with optional soft
+    class-pair weights.
 
     Expects a 2N-sized batch formed by stacking the clean and augmented views:
         z      = cat([z_clean, z_aug], dim=0)   shape (2N, D)
@@ -1149,8 +1151,21 @@ def supcon_loss(
 
     Parameters
     ----------
-    z      : (2N, D) projection vectors (will be L2-normalised internally)
-    labels : (2N,) integer class IDs; -1 marks unlabeled
+    z            : (2N, D) projection vectors (will be L2-normalised internally)
+    labels       : (2N,) integer class IDs; -1 marks unlabeled
+    pair_weights : (K, K) float tensor of class-pair weights, where K is the
+                   number of labeled classes.  Positive values attract pairs,
+                   negative values repel them.  Diagonal should be +1.0.
+                   If None, falls back to standard binary SupCon behaviour
+                   (same-class = +1, different-class excluded from positives).
+
+    Weighted loss (when pair_weights is provided):
+        For each labeled anchor i:
+            L_i = -sum_j( w[y_i, y_j] * sim_ij ) + log_denom_i
+        where w[y_i, y_j] is looked up from pair_weights and sum_j runs over
+        all other labeled samples j (both clean and augmented views).
+        The self-supervised fallback (aug pair) is always included for all
+        anchors regardless of label status.
     """
     N2 = z.size(0)      # = 2 * batch_size
     B  = N2 // 2
@@ -1162,33 +1177,61 @@ def supcon_loss(
     self_mask = torch.eye(N2, dtype=torch.bool, device=z.device)
     sim_no_self = sim.masked_fill(self_mask, float("-inf"))
 
-    # --- Build positive mask ---
-    # Self-supervised fallback: (i, i+B) and (i+B, i) for each sample
+    # Self-supervised fallback mask: (i, i+B) and (i+B, i) for each sample
     ss_mask = torch.zeros(N2, N2, dtype=torch.bool, device=z.device)
     idx = torch.arange(B, device=z.device)
     ss_mask[idx, idx + B] = True
     ss_mask[idx + B, idx] = True
 
-    # Supervised: same class, both labeled, not self
-    lab = labels.unsqueeze(1)                              # (2N, 1)
-    both_labeled = (labels >= 0).unsqueeze(1) & (labels >= 0).unsqueeze(0)
-    sup_mask = (lab == lab.T) & ~self_mask & both_labeled  # (2N, 2N)
+    if pair_weights is not None:
+        # --- Weighted soft SupCon ---
+        # Build a (2N, 2N) weight matrix from the K×K pair_weights table.
+        # Unlabeled samples (label == -1) get weight 0 against all others;
+        # their self-supervised aug pair is handled separately below.
+        pair_weights = pair_weights.to(z.device)
+        both_labeled = (labels >= 0).unsqueeze(1) & (labels >= 0).unsqueeze(0)
 
-    # Select: labeled anchors use sup_mask, unlabeled use ss_mask
-    labeled_anchor = (labels >= 0).unsqueeze(1).expand(N2, N2)
-    pos_mask = torch.where(labeled_anchor, sup_mask, ss_mask)
+        # Clamp labels to 0 for indexing (unlabeled = -1 → 0, ignored via mask)
+        lab_idx = labels.clamp(min=0)
+        w_matrix = pair_weights[lab_idx.unsqueeze(1), lab_idx.unsqueeze(0)]  # (2N,2N)
+        w_matrix = w_matrix * both_labeled.float()   # zero out unlabeled pairs
+        w_matrix = w_matrix * (~self_mask).float()   # zero out self
 
-    has_pos = pos_mask.any(dim=1)
-    if not has_pos.any():
-        return z.sum() * 0.0   # safe zero that keeps the computation graph
+        # Always add the self-supervised aug pair with weight +1 for all samples
+        w_matrix[ss_mask] = w_matrix[ss_mask].clamp(min=1.0)
 
-    # SupCon loss:  L_i = -1/|P_i| * sum_{p in P_i}(sim_ip) + log_denom_i
-    log_denom   = torch.logsumexp(sim_no_self, dim=1)               # (2N,)
-    n_pos       = pos_mask.float().sum(dim=1).clamp(min=1)          # (2N,)
-    pos_sim_sum = (sim * pos_mask.float()).sum(dim=1)                # (2N,)
-    loss_per    = -pos_sim_sum / n_pos + log_denom                   # (2N,)
+        log_denom   = torch.logsumexp(sim_no_self, dim=1)           # (2N,)
+        # Weighted positive contribution:  -sum_j( w_ij * sim_ij )
+        weighted_sim_sum = (sim * w_matrix).sum(dim=1)              # (2N,)
+        # Normalise by sum of positive weights (avoid divide-by-zero)
+        w_sum = w_matrix.clamp(min=0).sum(dim=1).clamp(min=1e-6)   # (2N,)
+        loss_per = -weighted_sim_sum / w_sum + log_denom            # (2N,)
 
-    return loss_per[has_pos].mean()
+        # Only compute loss for anchors that have at least one non-zero weight
+        has_signal = (w_matrix.abs().sum(dim=1) > 0)
+        if not has_signal.any():
+            return z.sum() * 0.0
+        return loss_per[has_signal].mean()
+
+    else:
+        # --- Standard binary SupCon ---
+        lab = labels.unsqueeze(1)
+        both_labeled = (labels >= 0).unsqueeze(1) & (labels >= 0).unsqueeze(0)
+        sup_mask = (lab == lab.T) & ~self_mask & both_labeled
+
+        labeled_anchor = (labels >= 0).unsqueeze(1).expand(N2, N2)
+        pos_mask = torch.where(labeled_anchor, sup_mask, ss_mask)
+
+        has_pos = pos_mask.any(dim=1)
+        if not has_pos.any():
+            return z.sum() * 0.0
+
+        log_denom   = torch.logsumexp(sim_no_self, dim=1)
+        n_pos       = pos_mask.float().sum(dim=1).clamp(min=1)
+        pos_sim_sum = (sim * pos_mask.float()).sum(dim=1)
+        loss_per    = -pos_sim_sum / n_pos + log_denom
+
+        return loss_per[has_pos].mean()
 
 
 def contrastive_ae_loss(
@@ -1380,14 +1423,16 @@ def train_supervised_contrastive_ae(
     temperature: float = 0.5,
     use_flip: bool     = False,
     intensity_scale_range: tuple | None = None,
+    pair_weights: torch.Tensor | None   = None,
 ):
     """
     Training loop for ContrastiveAE with Supervised Contrastive loss (SupCon).
 
     Two views per image are created on-the-fly (typically random 90° rotations,
     optionally with flips / noise / intensity scaling). For each mini-batch the
-    2N-sized projection set is built by
-    concatenating both views.  The SupCon loss pulls together:
+    2N-sized projection set is built by concatenating both views.
+
+    The SupCon loss pulls together:
       - same-class patches from different images (when labels are available)
       - each image with its own augmented view (fallback for unlabeled patches)
 
@@ -1397,6 +1442,10 @@ def train_supervised_contrastive_ae(
     ----------
     noise_prob   : salt-and-pepper corruption probability for the augmented view
     temperature  : softmax temperature for the SupCon loss
+    pair_weights : optional (K, K) float tensor encoding class-pair affinities.
+                   Positive values attract, negative values repel.  K must equal
+                   the number of distinct labeled classes.  If None, uses the
+                   standard binary SupCon (same-class = positive only).
     """
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
@@ -1429,7 +1478,8 @@ def train_supervised_contrastive_ae(
             labels_all = torch.cat([labels, labels], dim=0)            # (2N,)
 
             rl = F.mse_loss(recon, x, reduction="mean")
-            cl = supcon_loss(proj_all, labels_all, temperature=temperature)
+            cl = supcon_loss(proj_all, labels_all, temperature=temperature,
+                             pair_weights=pair_weights)
             loss = lambda_recon * rl + lambda_contrast * cl
 
             optimizer.zero_grad(); loss.backward(); optimizer.step()
@@ -1458,7 +1508,8 @@ def train_supervised_contrastive_ae(
                 labels_all = torch.cat([labels, labels], dim=0)
 
                 rl = F.mse_loss(recon, x, reduction="mean")
-                cl = supcon_loss(proj_all, labels_all, temperature=temperature)
+                cl = supcon_loss(proj_all, labels_all, temperature=temperature,
+                             pair_weights=pair_weights)
                 loss = lambda_recon * rl + lambda_contrast * cl
 
                 vl += loss.item(); vr += rl.item(); vc += cl.item()

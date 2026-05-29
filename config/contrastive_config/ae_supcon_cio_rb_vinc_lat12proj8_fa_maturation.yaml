@@ -1,0 +1,86 @@
+# =============================================================================
+# AE variant: supcon (Supervised Contrastive AE)
+# Normalization: CIO-RB  |  Dataset: vinc control + ycomp
+# latent_dim=12, proj_dim=8
+#
+# Weighted SupCon loss using FA maturation continuum pair matrix:
+#   Nascent → focal complex → focal adhesion → fibrillar adhesion
+#   Adjacent stages = mild negatives/positives; distant stages = strong negatives
+#
+# Results: ae_results/contrastive_run/supcon_cio_rb_vinc_lat12proj8_fa_maturation/
+# =============================================================================
+root_folder : "/net/projects/CLS/lding/data/fa_data_analysis"
+
+data:
+  patch_dirs:
+    - path           : root_folder + "/ae_results/pax_ch_patch/cio_rb/vinc/control/tiff_patches32"
+      condition      : 0
+      condition_name : "control"
+    - path           : root_folder + "/ae_results/pax_ch_patch/cio_rb/vinc/ycomp/tiff_patches32"
+      condition      : 1
+      condition_name : "ycomp"
+
+output:
+  result_dir : root_folder + "/ae_results/contrastive_run/supcon_cio_rb_vinc_lat12proj8_fa_maturation"
+
+model:
+  model_type   : "supcon"
+  latent_dim   : 12
+  input_ps     : 32
+  no_ch        : 1
+  BN_flag      : false
+  dropout_flag : false
+
+  proj_dim              : 8
+  noise_prob            : 0.0
+  temperature           : 0.5
+  lambda_recon          : 1.0
+  lambda_contrast       : 0.5
+  intensity_scale_range : [0.8, 1.2]
+
+  # FA maturation continuum pair weights
+  # Row/col order must match label_order in annotation block below
+  pair_weights:
+    classes:
+      - "Nascent Adhesion"
+      - "focal complex"
+      - "focal adhesion"
+      - "fibrillar adhesion"
+    matrix:
+      - [ 1.0,  0.3, -0.5, -1.0]   # Nascent Adhesion
+      - [ 0.3,  1.0,  0.3, -0.5]   # focal complex
+      - [-0.5,  0.3,  1.0,  0.3]   # focal adhesion
+      - [-1.0, -0.5,  0.3,  1.0]   # fibrillar adhesion
+
+training:
+  epochs                  : 500
+  lr                      : 0.001
+  batch_size              : 128
+  val_split               : 0.2
+  loss_norm_flag          : false
+  group_split             : true
+  weight_decay            : 0.0001
+  warmup_epochs           : 100
+  lr_scheduler            : "none"
+  early_stopping_patience : 0
+  min_epochs_for_best     : 100
+
+annotation:
+  annotation_file : root_folder + "/labelling/labels_vinc_20260521.csv"
+  label_col       : "classification"
+  filename_col    : "unique_ID"
+  label_order:
+    - "Nascent Adhesion"
+    - "focal complex"
+    - "focal adhesion"
+    - "fibrillar adhesion"
+    - "No adhesion"
+
+reconstruction:
+  save_recon      : true
+  recon_pad_size  : 64
+  recon_image_size: 1024
+
+misc:
+  device    : "auto"
+  log_level : "INFO"
