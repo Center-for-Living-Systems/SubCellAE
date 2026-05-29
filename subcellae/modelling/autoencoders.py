@@ -1418,6 +1418,11 @@ def train_contrastive_ae(
 
     _save_loss_curves(train_losses, val_losses, epochs,
                       "Contrastive AE Total Loss", result_dir, "contrastive")
+    _save_contrastive_component_curves(
+        train_recon, val_recon, train_contrast, val_contrast,
+        train_losses, val_losses, result_dir,
+        prefix="contrastive", title="Contrastive AE",
+    )
     return model, train_losses, val_losses
 
 
@@ -1580,6 +1585,11 @@ def train_supervised_contrastive_ae(
 
     _save_loss_curves(train_losses, val_losses, epochs,
                       "SupCon AE Total Loss", result_dir, "supcon")
+    _save_contrastive_component_curves(
+        train_recon, val_recon, train_contrast, val_contrast,
+        train_losses, val_losses, result_dir,
+        prefix="supcon", title="SupCon AE",
+    )
     return model, train_losses, val_losses
 
 
@@ -1644,4 +1654,37 @@ def _save_semisup_component_curves(
     fig.suptitle("SemiSup AE – component losses", fontweight="bold")
     fig.tight_layout()
     fig.savefig(os.path.join(result_dir, "semisup_component_losses.png"), dpi=150)
+    plt.close(fig)
+
+
+def _save_contrastive_component_curves(
+    train_recon, val_recon,
+    train_contrast, val_contrast,
+    train_total, val_total,
+    result_dir: str,
+    prefix: str = "contrastive",
+    title: str  = "Contrastive AE",
+):
+    """Three-panel loss figure: total | reconstruction | contrastive."""
+    epochs = len(train_total)
+    xs = range(epochs)
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4), sharey=False)
+
+    panels = [
+        (axes[0], train_total,    val_total,    "Total loss"),
+        (axes[1], train_recon,    val_recon,    "Reconstruction (MSE)"),
+        (axes[2], train_contrast, val_contrast, "Contrastive loss"),
+    ]
+    for ax, tr, va, subtitle in panels:
+        ax.plot(xs, tr, label="Train")
+        ax.plot(xs, va, label="Val")
+        ax.set_title(subtitle)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.legend()
+
+    fig.suptitle(f"{title} – component losses", fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(os.path.join(result_dir, f"{prefix}_component_losses.png"), dpi=150)
     plt.close(fig)
