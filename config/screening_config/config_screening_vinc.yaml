@@ -1,0 +1,50 @@
+# =============================================================================
+# Screening: binary adhesion vs no-adhesion classifier
+# Dataset: vinc (vinculin), labeled patches
+# Model: EfficientNet-B0 (pretrained ImageNet)
+# =============================================================================
+
+root_folder : "/net/projects/CLS/lding/data/fa_data_analysis"
+
+data:
+  label_csv     : root_folder + "/labelling/labels_vinc_20260521.csv"
+  patch_dirs:
+    control : root_folder + "/ae_results/pax_ch_patch/cio_rb/vinc/control/tiff_patches32"
+    ycomp   : root_folder + "/ae_results/pax_ch_patch/cio_rb/vinc/ycomp/tiff_patches32"
+  label_col     : "classification"
+  filename_col  : "unique_ID"
+  condition_col : "condition"
+  group_col     : "czi_filename"    # group-aware split: keep one CZI file in one split
+  ad_labels:
+    - "Nascent Adhesion"
+    - "focal complex"
+    - "focal adhesion"
+    - "fibrillar adhesion"
+  nonad_label   : "No adhesion"
+  exclude_labels:
+    - "Uncertain"
+
+output:
+  out_dir : root_folder + "/ae_results/screening/vinc_nonad_vs_ad"
+
+model:
+  backbone   : "efficientnet_b0"
+  pretrained : true
+  input_size : 224              # patches are upsampled 32→224 by bicubic interpolation
+  dropout    : 0.3
+
+training:
+  epochs          : 50
+  batch_size      : 64
+  lr              : 0.001
+  weight_decay    : 0.01
+  lr_scheduler    : "cosine"   # "cosine" | "plateau" | "none"
+  patience        : 15         # early stopping patience (epochs without val loss improvement)
+  use_augmentation: true       # random H/V flip + 180° rotation on training patches
+  num_workers     : 4
+  test_size       : 0.2
+  random_state    : 42
+
+misc:
+  device    : "auto"   # "auto" | "cpu" | "cuda"
+  log_level : "INFO"

@@ -1,0 +1,76 @@
+# =============================================================================
+# Screening experiment: jitter crop + histogram matching + ViT-small
+# Training: paxillin (ch1) re-cropped on-the-fly from source frames
+#           (±4px translation, ±15° rotation, intensity jitter)
+#           + histogram matching at train time (saves reference CDF)
+#
+# ViTs benefit from HM (unlike CNNs) because they have no inductive bias
+# toward local texture — HM aligns the global intensity distribution and
+# lets the model focus on patch-level structure.
+#
+# Source frames must be pre-extracted (SLURM job 933033 completed):
+#   ae_results/source_frames/cio_rb/vinc/{control,ycomp}/
+# =============================================================================
+
+root_folder : "/net/projects/CLS/lding/data/fa_data_analysis"
+
+data:
+  label_csv     : root_folder + "/labelling/labels_vinc_20260521.csv"
+  patch_dirs:
+    control : root_folder + "/ae_results/pax_ch_patch/cio_rb/vinc/control/tiff_patches32"
+    ycomp   : root_folder + "/ae_results/pax_ch_patch/cio_rb/vinc/ycomp/tiff_patches32"
+  label_col     : "classification"
+  filename_col  : "unique_ID"
+  condition_col : "condition"
+  group_col     : "czi_filename"
+  ad_labels:
+    - "Nascent Adhesion"
+    - "focal complex"
+    - "focal adhesion"
+    - "fibrillar adhesion"
+  nonad_label   : "No adhesion"
+  exclude_labels:
+    - "Uncertain"
+
+output:
+  out_dir : root_folder + "/ae_results/screening/jittercrop_vit_hm/vit_small_patch16_224_sz224"
+
+model:
+  backbone   : "vit_small_patch16_224"
+  pretrained : true
+  input_size : 224
+  dropout    : 0.3
+
+training:
+  epochs             : 50
+  batch_size         : 64
+  lr                 : 0.001
+  weight_decay       : 0.01
+  lr_scheduler       : "cosine"
+  patience           : 15
+  use_augmentation   : true
+  num_workers        : 4
+  test_size          : 0.2
+  random_state       : 42
+
+  use_intensity_jitter     : true
+  jitter_scale_lo          : 0.5
+  jitter_scale_hi          : 2.0
+  jitter_shift_std         : 0.05
+
+  pixel_correction         : "histogram"
+  correction_max_patches   : 5000
+
+jitter_crop:
+  enabled       : true
+  channel       : "pax"
+  max_shift_px  : 4
+  max_angle_deg : 15.0
+  pad_size      : 64
+  frame_dirs:
+    control : root_folder + "/ae_results/source_frames/cio_rb/vinc/control"
+    ycomp   : root_folder + "/ae_results/source_frames/cio_rb/vinc/ycomp"
+
+misc:
+  device    : "auto"
+  log_level : "INFO"

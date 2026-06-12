@@ -1,3 +1,10 @@
+# Project-specific
+logs/
+slides/
+*.pptx
+.~lock.*
+.nfs*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

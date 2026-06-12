@@ -1,0 +1,68 @@
+# =============================================================================
+# Screening eval: apply a trained vinc model to ppax (cross-dataset generalization)
+# No training — loads model_best.pt and evaluates on labelled ppax patches.
+#
+# Usage:
+#   python scripts/run_screening_eval.py \
+#       config/screening_config/config_screening_ppax_eval.yaml
+#
+# For sweep: override model_pt with --model_pt to point at each sweep job's output.
+#   python scripts/run_screening_eval.py \
+#       config/screening_config/config_screening_ppax_eval.yaml \
+#       --model_pt <sweep_out_dir>/model_best.pt \
+#       --out_dir  <sweep_out_dir>/ppax_eval
+# =============================================================================
+
+root_folder : "/net/projects/CLS/lding/data/fa_data_analysis"
+
+model:
+  # Path to the trained checkpoint — update to match the sweep run you want to evaluate.
+  # Default points to the baseline vinc run (efficientnet_b0, 224px).
+  model_pt   : root_folder + "/ae_results/screening/vinc_nonad_vs_ad/model_best.pt"
+  backbone   : "efficientnet_b0"   # must match the architecture that was trained
+  input_size : 224
+  dropout    : 0.3
+
+data:
+  label_csv     : root_folder + "/labelling/labels_ppax_20260521.csv"
+  patch_dirs:
+    control : root_folder + "/ae_results/pax_ch_patch/cio_rb/ppax/control/tiff_patches32"
+    ycomp   : root_folder + "/ae_results/pax_ch_patch/cio_rb/ppax/ycomp/tiff_patches32"
+  label_col     : "classification"
+  filename_col  : "unique_ID"
+  condition_col : "condition"
+  group_col     : "czi_filename"
+  ad_labels:
+    - "Nascent Adhesion"
+    - "focal complex"
+    - "focal adhesion"
+    - "fibrillar adhesion"
+  nonad_label   : "No adhesion"
+  exclude_labels:
+    - "Uncertain"
+
+output:
+  out_dir : root_folder + "/ae_results/screening/vinc_nonad_vs_ad/ppax_eval"
+
+inference:
+  batch_size  : 64
+  num_workers : 4
+
+# Dataset-level correction: maps ppax → vinc distribution.
+# correction_type: "none" | "linear" | "histogram"
+#   linear    — matches mean and std only (fast)
+#   histogram — full CDF matching (more accurate; requires ref_patch_dirs)
+# For histogram correction of HM-trained models, optionally set ref_cdf_dir to
+# the training out_dir (contains ref_cdf_src.npy / ref_cdf_ref.npy) so the
+# exact same CDF used at training time is reused at inference.
+dataset_correction:
+  correction_type  : "histogram"   # "none" | "linear" | "histogram"
+  ref_patch_dirs:
+    control : root_folder + "/ae_results/pax_ch_patch/cio_rb/vinc/control/tiff_patches32"
+    ycomp   : root_folder + "/ae_results/pax_ch_patch/cio_rb/vinc/ycomp/tiff_patches32"
+  max_stat_patches : 5000
+  ref_cdf_dir      : null   # set to a sweep_hm out_dir to reuse its saved CDF
+
+misc:
+  device    : "auto"
+  log_level : "INFO"

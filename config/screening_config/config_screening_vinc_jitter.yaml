@@ -1,0 +1,58 @@
+# =============================================================================
+# Screening experiment 1: intensity jitter only
+# Training: vinc paxillin (ch1) patches + random intensity scale/shift
+# =============================================================================
+
+root_folder : "/net/projects/CLS/lding/data/fa_data_analysis"
+
+data:
+  label_csv     : root_folder + "/labelling/labels_vinc_20260521.csv"
+  patch_dirs:
+    control : root_folder + "/ae_results/pax_ch_patch/cio_rb/vinc/control/tiff_patches32"
+    ycomp   : root_folder + "/ae_results/pax_ch_patch/cio_rb/vinc/ycomp/tiff_patches32"
+  label_col     : "classification"
+  filename_col  : "unique_ID"
+  condition_col : "condition"
+  group_col     : "czi_filename"
+  ad_labels:
+    - "Nascent Adhesion"
+    - "focal complex"
+    - "focal adhesion"
+    - "fibrillar adhesion"
+  nonad_label   : "No adhesion"
+  exclude_labels:
+    - "Uncertain"
+
+output:
+  out_dir : root_folder + "/ae_results/screening/sweep_jitter/placeholder"   # overridden by --out_dir
+
+model:
+  backbone   : "efficientnet_b0"   # overridden by --backbone
+  pretrained : true
+  input_size : 224                  # overridden by --input_size
+  dropout    : 0.3
+
+training:
+  epochs            : 50
+  batch_size        : 64
+  lr                : 0.001
+  weight_decay      : 0.01
+  lr_scheduler      : "cosine"
+  patience          : 15
+  use_augmentation  : true
+  num_workers       : 4
+  test_size         : 0.2
+  random_state      : 42
+
+  # Intensity jitter: random multiplicative scale + additive shift applied
+  # before clip-to-[0,1], so it changes effective dynamic range per patch.
+  use_intensity_jitter : true
+  jitter_scale_lo      : 0.5    # U(0.5, 2.0) roughly covers vinc↔ppax spread
+  jitter_scale_hi      : 2.0
+  jitter_shift_std     : 0.05   # N(0, 0.05) baseline shift
+
+  extra_patch_dirs     : null   # single channel
+
+misc:
+  device    : "auto"
+  log_level : "INFO"
