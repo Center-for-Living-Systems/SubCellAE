@@ -155,7 +155,8 @@ def pack(ds: str, cond: str) -> Path | None:
 
     # ── load source frames ───────────────────────────────────────────────────
     ds_ch    = DS_CHANNEL[ds]
-    channels = ["pax", "act", ds_ch] if ds_ch not in ("pax", "act") else ["pax", "act"]
+    channels = (["pax", "zyx", "act", ds_ch] if ds_ch not in ("pax", "zyx", "act")
+                else ["pax", "zyx", "act"])
     if not frame_dir.exists():
         print(f"    WARNING: frame dir missing: {frame_dir}", flush=True)
         frame_arrays = {}

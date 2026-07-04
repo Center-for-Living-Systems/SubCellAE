@@ -59,8 +59,8 @@ except Exception:
 
 def load_h5(path: str):
     import json as _json
-    _ABBR = {'pax': 'paxillin', 'act': 'actin', 'vinc': 'vinculin',
-             'pfak': 'pFAK', 'ppax': 'pPax'}
+    _ABBR = {'pax': 'paxillin', 'zyx': 'zyxin', 'act': 'actin',
+             'vinc': 'vinculin', 'pfak': 'pFAK', 'ppax': 'pPax'}
     with h5py.File(path, 'r') as f:
         df         = pd.read_csv(io.StringIO(f['meta/csv'][()].decode()))
         images_raw = f['images/raw'][()]    if 'images/raw'  in f else None
