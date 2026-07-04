@@ -236,10 +236,12 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
     )
 
     # ── Full-canvas channel views (read-only, linked ranges) ─────────────────
+    # Exclude the main channel (paxillin) — it's already shown in the main canvas.
+    _side_ch_indices = [ci for ci in range(_n_canvas_ch) if ci != _MAIN_CH]
     ch_canvas_srcs: list = []
     ch_canvas_figs: list = []
     _blank_canvas = np.zeros((H, W), dtype=np.float32)
-    for _ci in range(_n_canvas_ch):
+    for _ci in _side_ch_indices:
         _src = ColumnDataSource(dict(
             image=[np.ascontiguousarray(np.flipud(_blank_canvas))],
             x=[0], y=[0], dw=[W], dh=[H],
@@ -302,7 +304,7 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
         _key = _norm_fkey(group_key)
         if images_allch_norm and _key in images_allch_norm:
             ch_arr_allch = images_allch_norm[_key]   # (C, H', W')
-            for _ci, _csrc in enumerate(ch_canvas_srcs):
+            for _csrc, _ci in zip(ch_canvas_srcs, _side_ch_indices):
                 if _ci < ch_arr_allch.shape[0]:
                     _cimg = _display_norm(ch_arr_allch[_ci].astype(np.float32))
                     _csrc.data = dict(
@@ -580,10 +582,8 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
     )
 
     # ── Right panel: 3 other-channel full canvases + 4 patch thumbnails ─────────
-    # _MAIN_CH is defined above (used for canvas_fig title too); skip it here.
-    _side_canvas_figs = [f for i, f in enumerate(ch_canvas_figs) if i != _MAIN_CH]
-    _side_canvas_row  = (pn.Row(*[pn.pane.Bokeh(f) for f in _side_canvas_figs])
-                         if _side_canvas_figs else None)
+    _side_canvas_row  = (pn.Row(*[pn.pane.Bokeh(f) for f in ch_canvas_figs])
+                         if ch_canvas_figs else None)
     _patch_thumb_row  = (pn.Row(*[pn.pane.Bokeh(f) for f in ch_figs])
                          if ch_figs else None)
 
