@@ -58,6 +58,9 @@ except Exception:
 # ── HDF5 loading ──────────────────────────────────────────────────────────────
 
 def load_h5(path: str):
+    import json as _json
+    _ABBR = {'pax': 'paxillin', 'act': 'actin', 'vinc': 'vinculin',
+             'pfak': 'pFAK', 'ppax': 'pPax'}
     with h5py.File(path, 'r') as f:
         df         = pd.read_csv(io.StringIO(f['meta/csv'][()].decode()))
         images_raw = f['images/raw'][()]    if 'images/raw'  in f else None
@@ -65,28 +68,48 @@ def load_h5(path: str):
                       if 'images/meta' in f else None)
         patches_allch = f['patches/allch'][()] if 'patches/allch' in f else None
         images_allch: dict = {}
+        channel_names = None
+
         if 'images/allch' in f:
+            # pack_interactive_h5 / pack_labeler_from_prep format
             for gname in f['images/allch']:
                 images_allch[gname] = f['images/allch'][gname][()]
+            _cn = f.attrs.get('channel_names', None)
+            channel_names = _json.loads(_cn) if _cn else None
+        elif img_meta is not None and images_raw is not None:
+            # pack_patches_label_h5 format: separate per-channel frame arrays
+            _extra = sorted(k for k in f['images'].keys() if k not in ('raw', 'meta'))
+            _extra_arrs = {k: f[f'images/{k}'][()] for k in _extra}
+            for _, row in img_meta.iterrows():
+                fi  = int(row['frame'])
+                grp = str(row['group'])
+                chs = ([images_raw[fi].astype(np.float32)] +
+                       [_extra_arrs[k][fi].astype(np.float32) for k in _extra])
+                images_allch[grp] = np.stack(chs)
+            _abbrs = list(f.attrs.get('channels', ['pax'] + list(_extra)))
+            channel_names = [_ABBR.get(a, a) for a in _abbrs]
+
         pad_size    = float(f.attrs.get('pad_size', 64))
         image_scale = float(f.attrs.get('image_scale', 1.0))
         result_dir  = Path(str(f.attrs.get('result_dir', '')))
-        _ch_names_raw = f.attrs.get('channel_names', None)
-        channel_names = (__import__('json').loads(_ch_names_raw)
-                         if _ch_names_raw else None)
     return df, images_raw, img_meta, patches_allch, images_allch, channel_names, pad_size, image_scale, result_dir
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
 def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
-    df, images_raw, img_meta, patches_allch, images_allch, _, _, image_scale, result_dir = load_h5(h5_path)
+    df, images_raw, img_meta, patches_allch, images_allch, _loaded_ch_names, _, image_scale, result_dir = load_h5(h5_path)
 
-    # Hard-coded channel mapping: ch1=paxillin, ch2=zyxin, ch3=actin
-    # ch0 is the variable channel — detect from path/result_dir keywords
-    _path_str = (str(h5_path) + ' ' + str(result_dir)).lower()
-    _ch0 = next((kw for kw in ('vinc', 'pfak', 'ppax') if kw in _path_str), 'Ch 0')
-    channel_names = [_ch0, 'paxillin', 'zyxin', 'actin']
+    if _loaded_ch_names:
+        channel_names = _loaded_ch_names
+    else:
+        # Fallback: hard-code ch1=paxillin, ch2=zyxin, ch3=actin; detect ch0 from path
+        _path_str = (str(h5_path) + ' ' + str(result_dir)).lower()
+        _ch0 = next((kw for kw in ('vinc', 'pfak', 'ppax') if kw in _path_str), 'Ch 0')
+        channel_names = [_ch0, 'paxillin', 'zyxin', 'actin']
+
+    # Main channel = paxillin (shown on the large canvas)
+    _MAIN_CH = next((i for i, n in enumerate(channel_names) if 'pax' in n.lower()), 0)
 
     # Old-format image fallback
     recon_images_dir = result_dir / 'recon' / 'images'
@@ -174,7 +197,6 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
         ch_srcs.append(_src)
         ch_figs.append(_fig)
 
-    _MAIN_CH = 1
     canvas_fig = figure(
         width=720, height=720,
         x_range=Range1d(0, W), y_range=Range1d(0, H),
