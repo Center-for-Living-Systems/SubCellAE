@@ -134,8 +134,7 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
             if matches.empty:
                 return np.zeros((512, 512), dtype=np.float32)
             arr = images_raw[int(matches.iloc[0]['frame'])].astype(np.float32)
-            mx = arr.max()
-            return arr / mx if mx > 0 else arr
+            return _display_norm(arr)
     else:
         unique_groups = sorted(p.stem[4:] for p in old_img_files)
         def _get_canvas(group_key: str) -> np.ndarray:
@@ -143,8 +142,7 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
             arr = tifffile.imread(str(p)).astype(np.float32)
             if arr.ndim == 3:
                 arr = arr[0]
-            mx = arr.max()
-            return arr / mx if mx > 0 else arr
+            return _display_norm(arr)
 
     img_options = {f"{grp_to_cond.get(g, '?')} | {g}": g
                    for g in unique_groups}
@@ -153,6 +151,13 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
     import re as _frame_re
     def _norm_fkey(k: str) -> str:
         return _frame_re.sub(r'_f0*(\d)', r'_f\1', k)
+
+    def _display_norm(arr: np.ndarray, pct: float = 99.9) -> np.ndarray:
+        """Clip at percentile then scale to [0, 1] for display."""
+        hi = float(np.percentile(arr, pct))
+        if hi <= 0:
+            hi = float(arr.max())
+        return np.clip(arr, 0, hi) / hi if hi > 0 else arr
 
     images_allch_norm: dict = {_norm_fkey(k): v for k, v in images_allch.items()}
 
@@ -299,9 +304,7 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
             ch_arr_allch = images_allch_norm[_key]   # (C, H', W')
             for _ci, _csrc in enumerate(ch_canvas_srcs):
                 if _ci < ch_arr_allch.shape[0]:
-                    _cimg = ch_arr_allch[_ci].astype(np.float32)
-                    _mx = _cimg.max()
-                    _cimg = _cimg / _mx if _mx > 0 else _cimg
+                    _cimg = _display_norm(ch_arr_allch[_ci].astype(np.float32))
                     _csrc.data = dict(
                         image=[np.ascontiguousarray(np.flipud(_cimg))],
                         x=[0], y=[0], dw=[_cimg.shape[1]], dh=[_cimg.shape[0]],
@@ -445,9 +448,7 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
                 _x0 = max(0, _cx - _half); _x1 = min(_W_c, _cx + _half)
                 for _ci, _csrc in enumerate(ch_srcs):
                     if _ci < _C:
-                        _patch = _allch_c[_ci, _y0:_y1, _x0:_x1].astype(np.float32)
-                        _mx = _patch.max()
-                        _patch = _patch / _mx if _mx > 0 else _patch
+                        _patch = _display_norm(_allch_c[_ci, _y0:_y1, _x0:_x1].astype(np.float32))
                         _csrc.data = dict(
                             image=[np.ascontiguousarray(np.flipud(_patch))],
                             x=[0], y=[0], dw=[_patch.shape[1]], dh=[_patch.shape[0]],

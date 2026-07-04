@@ -20,7 +20,7 @@
 # nih3t3   | control |  16  | vinculin
 # nih3t3   | ycomp   |  14  | vinculin
 #
-# Channels per dataset: ch0=marker, ch1=pax(scale=8), ch2=zyx(scale=5), ch3=act(scale=5)
+# Channels per dataset: ch0=marker(scale=5), ch1=pax(scale=5), ch2=zyx(scale=4), ch3=act(scale=4)
 # Output: ae_results/source_frames/cio_rb/{dataset}/{condition}/
 
 set -eo pipefail
@@ -64,4 +64,12 @@ python scripts/run_frameextract_from_config.py "$CFG/nih3t3_control_cio_rb.yaml"
 echo "[$(date)] nih3t3 ycomp (14 × 4 ch)..."
 python scripts/run_frameextract_from_config.py "$CFG/nih3t3_ycomp_cio_rb.yaml"
 
-echo "[$(date)] ALL DONE"
+echo "[$(date)] ALL DONE — frame extraction"
+
+echo ""
+echo "======================================================================"
+echo "[$(date)] Repacking label H5 files (all 4 datasets × 2 conditions)..."
+echo "======================================================================"
+/net/projects/CLS/lding/conda_env/core_env/bin/python3 scripts/pack_patches_label_h5.py
+
+echo "[$(date)] ALL DONE — H5 packing complete"
