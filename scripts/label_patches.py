@@ -78,7 +78,11 @@ def load_h5(path: str):
             channel_names = _json.loads(_cn) if _cn else None
         elif img_meta is not None and images_raw is not None:
             # pack_patches_label_h5 format: separate per-channel frame arrays
-            _extra = sorted(k for k in f['images'].keys() if k not in ('raw', 'meta'))
+            # Preserve order from attrs['channels'] so name ↔ image index stays consistent
+            _abbrs = list(f.attrs.get('channels', []))
+            _extra = [a for a in _abbrs if a != 'pax' and f'images/{a}' in f]
+            if not _extra:  # fallback if attrs missing
+                _extra = sorted(k for k in f['images'].keys() if k not in ('raw', 'meta'))
             _extra_arrs = {k: f[f'images/{k}'][()] for k in _extra}
             for _, row in img_meta.iterrows():
                 fi  = int(row['frame'])
@@ -86,8 +90,7 @@ def load_h5(path: str):
                 chs = ([images_raw[fi].astype(np.float32)] +
                        [_extra_arrs[k][fi].astype(np.float32) for k in _extra])
                 images_allch[grp] = np.stack(chs)
-            _abbrs = list(f.attrs.get('channels', ['pax'] + list(_extra)))
-            channel_names = [_ABBR.get(a, a) for a in _abbrs]
+            channel_names = ['paxillin'] + [_ABBR.get(a, a) for a in _extra]
 
         pad_size    = float(f.attrs.get('pad_size', 64))
         image_scale = float(f.attrs.get('image_scale', 1.0))
@@ -249,14 +252,13 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
         )
         _fig.rect(
             'x', 'y', 'width', 'height', source=rects_src,
-            fill_color='fill_color', fill_alpha='fill_alpha',
-            line_color='line_color', line_width=1.5, line_alpha=1.0,
-            nonselection_fill_color='fill_color', nonselection_fill_alpha='fill_alpha',
-            nonselection_line_color='line_color', nonselection_line_alpha=1.0,
+            fill_alpha=0, line_color='line_color', line_width=0.6, line_alpha=0.8,
+            nonselection_fill_alpha=0, nonselection_line_color='line_color',
+            nonselection_line_alpha=0.8,
         )
         _fig.rect(
             'x', 'y', 'width', 'height', source=sel_src,
-            fill_alpha=0, line_color='white', line_width=2.8,
+            fill_alpha=0, line_color='white', line_width=1.5,
         )
         ch_canvas_srcs.append(_src)
         ch_canvas_figs.append(_fig)
@@ -517,8 +519,13 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
     finish_btn.on_click(_on_finish)
 
     # ── Resume from previous CSV ──────────────────────────────────────────────
+    _h5_dir = Path(h5_path).parent
+    _h5_stem = Path(h5_path).stem
+    _prev_csvs = sorted(_h5_dir.glob(f'{_h5_stem}_*.csv'))
+    _resume_default = str(_prev_csvs[-1]) if _prev_csvs else ''
     resume_input = pn.widgets.TextInput(
-        placeholder='Paste path to a previous labels CSV to resume…',
+        value=_resume_default,
+        placeholder=f'Path to previous labels CSV (default folder: {_h5_dir})',
         width=500,
     )
     resume_btn = pn.widgets.Button(name='Load CSV', button_type='primary', width=100)

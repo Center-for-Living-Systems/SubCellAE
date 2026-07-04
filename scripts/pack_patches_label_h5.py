@@ -155,7 +155,8 @@ def pack(ds: str, cond: str) -> Path | None:
 
     # ── load source frames ───────────────────────────────────────────────────
     ds_ch    = DS_CHANNEL[ds]
-    channels = (["pax", "zyx", "act", ds_ch] if ds_ch not in ("pax", "zyx", "act")
+    # Order: pax (main canvas), then marker, zyxin, actin — so side panels show [marker, zyx, act]
+    channels = (["pax", ds_ch, "zyx", "act"] if ds_ch not in ("pax", "zyx", "act")
                 else ["pax", "zyx", "act"])
     if not frame_dir.exists():
         print(f"    WARNING: frame dir missing: {frame_dir}", flush=True)
