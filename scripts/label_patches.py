@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 import panel as pn
 import tifffile
-from bokeh.events import Tap
+from bokeh.events import DoubleTap, Tap
 from bokeh.models import ColumnDataSource, LinearColorMapper, Range1d
 from bokeh.plotting import figure
 
@@ -43,6 +43,7 @@ LABEL_OPTIONS = [
     "Nascent Adhesion",
     "focal complex",
     "focal adhesion",
+    "fibrillar adhesion",
     "No adhesion",
 ]
 UNLABELED_COLOR = "#555555"
@@ -62,16 +63,30 @@ def load_h5(path: str):
         images_raw = f['images/raw'][()]    if 'images/raw'  in f else None
         img_meta   = (pd.read_csv(io.StringIO(f['images/meta'][()].decode()))
                       if 'images/meta' in f else None)
+        patches_allch = f['patches/allch'][()] if 'patches/allch' in f else None
+        images_allch: dict = {}
+        if 'images/allch' in f:
+            for gname in f['images/allch']:
+                images_allch[gname] = f['images/allch'][gname][()]
         pad_size    = float(f.attrs.get('pad_size', 64))
         image_scale = float(f.attrs.get('image_scale', 1.0))
         result_dir  = Path(str(f.attrs.get('result_dir', '')))
-    return df, images_raw, img_meta, pad_size, image_scale, result_dir
+        _ch_names_raw = f.attrs.get('channel_names', None)
+        channel_names = (__import__('json').loads(_ch_names_raw)
+                         if _ch_names_raw else None)
+    return df, images_raw, img_meta, patches_allch, images_allch, channel_names, pad_size, image_scale, result_dir
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
 def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
-    df, images_raw, img_meta, pad_size, image_scale, result_dir = load_h5(h5_path)
+    df, images_raw, img_meta, patches_allch, images_allch, _, _, image_scale, result_dir = load_h5(h5_path)
+
+    # Hard-coded channel mapping: ch1=paxillin, ch2=zyxin, ch3=actin
+    # ch0 is the variable channel — detect from path/result_dir keywords
+    _path_str = (str(h5_path) + ' ' + str(result_dir)).lower()
+    _ch0 = next((kw for kw in ('vinc', 'pfak', 'ppax') if kw in _path_str), 'Ch 0')
+    channel_names = [_ch0, 'paxillin', 'zyxin', 'actin']
 
     # Old-format image fallback
     recon_images_dir = result_dir / 'recon' / 'images'
@@ -108,6 +123,13 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
     img_options = {f"{grp_to_cond.get(g, '?')} | {g}": g
                    for g in unique_groups}
 
+    # Normalize frame numbers: strip leading zeros so control_f0000 == control_f0
+    import re as _frame_re
+    def _norm_fkey(k: str) -> str:
+        return _frame_re.sub(r'_f0*(\d)', r'_f\1', k)
+
+    images_allch_norm: dict = {_norm_fkey(k): v for k, v in images_allch.items()}
+
     # ── Label storage ─────────────────────────────────────────────────────────
     labels: dict[str, str] = {}   # filename → label
     _state: dict = {}
@@ -127,10 +149,38 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
     ))
     sel_src = ColumnDataSource(dict(x=[], y=[], width=[], height=[]))
 
+    # ── Per-channel patch display ─────────────────────────────────────────────
+    _n_ch = patches_allch.shape[1] if patches_allch is not None else 0
+    _ps   = patches_allch.shape[2] if patches_allch is not None else 32
+    _blank = np.zeros((_ps, _ps), dtype=np.float32)
+
+    ch_srcs, ch_figs = [], []
+    for _ci in range(_n_ch):
+        _src = ColumnDataSource(dict(
+            image=[np.ascontiguousarray(np.flipud(_blank))],
+            x=[0], y=[0], dw=[_ps], dh=[_ps],
+        ))
+        _fig = figure(
+            width=225, height=250,
+            x_range=Range1d(0, _ps), y_range=Range1d(0, _ps),
+            title=(channel_names[_ci] if channel_names and _ci < len(channel_names) else f'Ch {_ci}'),
+            tools='', toolbar_location=None,
+        )
+        _fig.image(
+            image='image', source=_src,
+            x=0, y=0, dw=_ps, dh=_ps,
+            color_mapper=LinearColorMapper(palette=GRAY256, low=0.0, high=1.0),
+        )
+        ch_srcs.append(_src)
+        ch_figs.append(_fig)
+
+    _MAIN_CH = 1
     canvas_fig = figure(
         width=720, height=720,
         x_range=Range1d(0, W), y_range=Range1d(0, H),
-        title='Select a label below, then click a patch to assign it',
+        title=(channel_names[_MAIN_CH]
+               if channel_names and _MAIN_CH < len(channel_names)
+               else 'main canvas'),
         tools='pan,wheel_zoom,reset,tap',
         toolbar_location='above',
     )
@@ -144,11 +194,49 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
         'x', 'y', 'width', 'height', source=rects_src,
         fill_color='fill_color', fill_alpha='fill_alpha',
         line_color='line_color', line_width=1.5, line_alpha=1.0,
+        nonselection_fill_color='fill_color', nonselection_fill_alpha='fill_alpha',
+        nonselection_line_color='line_color', nonselection_line_alpha=1.0,
     )
     canvas_fig.rect(
         'x', 'y', 'width', 'height', source=sel_src,
         fill_alpha=0, line_color='white', line_width=2.8,
     )
+
+    # ── Full-canvas channel views (read-only, linked ranges) ─────────────────
+    _n_canvas_ch = (next(iter(images_allch.values())).shape[0]
+                    if images_allch else 0)
+    ch_canvas_srcs: list = []
+    ch_canvas_figs: list = []
+    _blank_canvas = np.zeros((H, W), dtype=np.float32)
+    for _ci in range(_n_canvas_ch):
+        _src = ColumnDataSource(dict(
+            image=[np.ascontiguousarray(np.flipud(_blank_canvas))],
+            x=[0], y=[0], dw=[W], dh=[H],
+        ))
+        _fig = figure(
+            width=400, height=400,
+            x_range=canvas_fig.x_range, y_range=canvas_fig.y_range,
+            title=(channel_names[_ci] if channel_names and _ci < len(channel_names) else f'Ch {_ci}'),
+            tools='', toolbar_location=None,
+        )
+        _fig.image(
+            image='image', source=_src,
+            x='x', y='y', dw='dw', dh='dh',
+            color_mapper=LinearColorMapper(palette=GRAY256, low=0.0, high=1.0),
+        )
+        _fig.rect(
+            'x', 'y', 'width', 'height', source=rects_src,
+            fill_color='fill_color', fill_alpha='fill_alpha',
+            line_color='line_color', line_width=1.5, line_alpha=1.0,
+            nonselection_fill_color='fill_color', nonselection_fill_alpha='fill_alpha',
+            nonselection_line_color='line_color', nonselection_line_alpha=1.0,
+        )
+        _fig.rect(
+            'x', 'y', 'width', 'height', source=sel_src,
+            fill_alpha=0, line_color='white', line_width=2.8,
+        )
+        ch_canvas_srcs.append(_src)
+        ch_canvas_figs.append(_fig)
 
     # ── Rect builder ─────────────────────────────────────────────────────────
     def _rects_for_group(group_key: str, img_H: int) -> dict:
@@ -170,7 +258,7 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
             ws.append(float(ps) * image_scale)
             hs.append(float(ps) * image_scale)
             fills.append(color)
-            alphas.append(0.8 if lbl else 0.1)
+            alphas.append(0.7 if lbl else 0.1)
             lines.append(color)
             idxs.append(i)
         return dict(x=xs, y=ys, width=ws, height=hs,
@@ -179,6 +267,37 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
 
     _state.update(group=init_group, H=H, W=W)
     rects_src.data = _rects_for_group(init_group, H)
+
+    def _update_ch_canvas(group_key: str, img_H: int, img_W: int) -> None:
+        _key = _norm_fkey(group_key)
+        if images_allch_norm and _key in images_allch_norm:
+            ch_arr_allch = images_allch_norm[_key]   # (C, H', W')
+            for _ci, _csrc in enumerate(ch_canvas_srcs):
+                if _ci < ch_arr_allch.shape[0]:
+                    _cimg = ch_arr_allch[_ci].astype(np.float32)
+                    _csrc.data = dict(
+                        image=[np.ascontiguousarray(np.flipud(_cimg))],
+                        x=[0], y=[0], dw=[_cimg.shape[1]], dh=[_cimg.shape[0]],
+                    )
+        elif images_allch_norm and ch_canvas_srcs:
+            import sys as _sys
+            print(f"[label] WARN: group_key {_key!r} not in images/allch "
+                  f"(available: {sorted(images_allch_norm.keys())[:4]})", file=_sys.stderr)
+            _blank = np.zeros((img_H, img_W), dtype=np.float32)
+            for _csrc in ch_canvas_srcs:
+                _csrc.data = dict(
+                    image=[np.ascontiguousarray(np.flipud(_blank))],
+                    x=[0], y=[0], dw=[img_W], dh=[img_H],
+                )
+        elif ch_canvas_srcs:
+            _blank = np.zeros((img_H, img_W), dtype=np.float32)
+            for _csrc in ch_canvas_srcs:
+                _csrc.data = dict(
+                    image=[np.ascontiguousarray(np.flipud(_blank))],
+                    x=[0], y=[0], dw=[img_W], dh=[img_H],
+                )
+
+    _update_ch_canvas(init_group, H, W)
 
     def _load_group(group_key: str) -> None:
         arr    = _get_canvas(group_key)
@@ -192,6 +311,12 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
         rects_src.data = _rects_for_group(group_key, Hn)
         sel_src.data   = dict(x=[], y=[], width=[], height=[])
         _state.update(group=group_key, H=Hn, W=Wn)
+        _update_ch_canvas(group_key, Hn, Wn)
+        for _csrc in ch_srcs:
+            _csrc.data = dict(
+                image=[np.ascontiguousarray(np.flipud(_blank))],
+                x=[0], y=[0], dw=[_ps], dh=[_ps],
+            )
 
     # ── Widgets ───────────────────────────────────────────────────────────────
     img_selector = pn.widgets.Select(
@@ -239,6 +364,14 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
         near_i  = int(np.argmin(dists))
         near_df = int(df_idx[near_i])
 
+        # Ignore clicks outside the nearest patch boundary
+        ws_bk = np.array(rects_src.data['width'],  dtype=float)
+        hs_bk = np.array(rects_src.data['height'], dtype=float)
+        hw = ws_bk[near_i] / image_scale / 2
+        hh = hs_bk[near_i] / image_scale / 2
+        if abs(tap_cx - cx_arr[near_i]) > hw or abs(tap_cy - cy_arr[near_i]) > hh:
+            return
+
         # Save position before refresh (indices shift after update)
         sel_x = float(xs_bk[near_i])
         sel_y = float(ys_bk[near_i])
@@ -261,9 +394,57 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
             f'<span style="color:{color};font-weight:bold;">{active}</span>'
             f'</span>'
         )
+        # Update per-channel patch display
+        if patches_allch is not None and near_df < len(patches_allch):
+            allch = patches_allch[near_df]   # (C, ps, ps) float32
+            for _ci, (_csrc, _cfig) in enumerate(zip(ch_srcs, ch_figs)):
+                if _ci < allch.shape[0]:
+                    _arr = allch[_ci].astype(np.float32)
+                    _csrc.data = dict(
+                        image=[np.ascontiguousarray(np.flipud(_arr))],
+                        x=[0], y=[0], dw=[_arr.shape[1]], dh=[_arr.shape[0]],
+                    )
         _update_count()
 
     canvas_fig.on_event(Tap, _on_tap)
+
+    # ── Double-click to remove label ──────────────────────────────────────────
+    def _on_doubletap(event: DoubleTap) -> None:
+        H_cur  = _state['H']
+        tap_cx = event.x / image_scale
+        tap_cy = (H_cur - event.y) / image_scale
+
+        xs_bk  = np.array(rects_src.data['x'],      dtype=float)
+        ys_bk  = np.array(rects_src.data['y'],      dtype=float)
+        df_idx = np.array(rects_src.data['df_idx'], dtype=int)
+        if len(xs_bk) == 0:
+            return
+
+        cx_arr = xs_bk / image_scale
+        cy_arr = (H_cur - ys_bk) / image_scale
+        dists  = np.sqrt((cx_arr - tap_cx)**2 + (cy_arr - tap_cy)**2)
+        near_i = int(np.argmin(dists))
+
+        ws_bk = np.array(rects_src.data['width'],  dtype=float)
+        hs_bk = np.array(rects_src.data['height'], dtype=float)
+        hw = ws_bk[near_i] / image_scale / 2
+        hh = hs_bk[near_i] / image_scale / 2
+        if abs(tap_cx - cx_arr[near_i]) > hw or abs(tap_cy - cy_arr[near_i]) > hh:
+            return
+
+        row   = df.iloc[int(df_idx[near_i])]
+        fname = str(row.get('filename', ''))
+        if fname in labels:
+            del labels[fname]
+            rects_src.data = _rects_for_group(_state['group'], _state['H'])
+            sel_src.data   = dict(x=[], y=[], width=[], height=[])
+            status_md.object = (
+                f'<span style="font-size:13px;">Removed label from '
+                f'<b>{Path(fname).stem}</b></span>'
+            )
+            _update_count()
+
+    canvas_fig.on_event(DoubleTap, _on_doubletap)
 
     # ── Finish & Save ─────────────────────────────────────────────────────────
     finish_btn = pn.widgets.Button(
@@ -289,41 +470,44 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
 
     finish_btn.on_click(_on_finish)
 
-    # ── Load previous CSV ─────────────────────────────────────────────────────
-    load_path_input = pn.widgets.TextInput(
-        placeholder='Path to previous labels CSV to resume…',
-        width=480,
+    # ── Resume from previous CSV ──────────────────────────────────────────────
+    resume_input = pn.widgets.TextInput(
+        placeholder='Paste path to a previous labels CSV to resume…',
+        width=500,
     )
-    load_btn = pn.widgets.Button(name='Load CSV', button_type='primary', width=100)
+    resume_btn = pn.widgets.Button(name='Load CSV', button_type='primary', width=100)
 
-    def _on_load(event) -> None:
-        csv_path = load_path_input.value.strip()
+    def _on_resume(event) -> None:
+        csv_path = resume_input.value.strip()
         if not csv_path:
-            status_md.object = '<i style="color:#e55;">Enter a CSV path first.</i>'
+            status_md.object = '<i style="color:#e55;">Paste a CSV path first.</i>'
             return
         p = Path(csv_path)
         if not p.exists():
-            status_md.object = f'<i style="color:#e55;">File not found: {csv_path}</i>'
+            status_md.object = f'<i style="color:#e55;">File not found: {p}</i>'
             return
         try:
-            loaded = pd.read_csv(str(p))
-            if 'filename' not in loaded.columns or 'label' not in loaded.columns:
-                status_md.object = '<i style="color:#e55;">CSV must have "filename" and "label" columns.</i>'
+            prev = pd.read_csv(p)
+            if 'filename' not in prev.columns or 'label' not in prev.columns:
+                status_md.object = '<i style="color:#e55;">CSV must have filename and label columns.</i>'
                 return
-            for _, row in loaded.iterrows():
-                if pd.notna(row['label']) and str(row['label']).strip():
-                    labels[str(row['filename'])] = str(row['label'])
+            loaded = 0
+            for _, row in prev.dropna(subset=['filename', 'label']).iterrows():
+                fname = str(row['filename'])
+                lbl   = str(row['label']).strip()
+                if lbl and lbl in LABEL_OPTIONS:
+                    labels[fname] = lbl
+                    loaded += 1
             rects_src.data = _rects_for_group(_state['group'], _state['H'])
             _update_count()
             status_md.object = (
-                f'<span style="color:#3c3;font-size:13px;font-weight:bold;">'
-                f'✓ Loaded {len(loaded)} rows from {p.name} '
-                f'({len(labels)} labeled patches active)</span>'
+                f'<span style="color:#38a;font-size:13px;font-weight:bold;">'
+                f'✓ Resumed {loaded} labels from {p.name}</span>'
             )
-        except Exception as exc:
-            status_md.object = f'<i style="color:#e55;">Error loading CSV: {exc}</i>'
+        except Exception as e:
+            status_md.object = f'<i style="color:#e55;">Error loading CSV: {e}</i>'
 
-    load_btn.on_click(_on_load)
+    resume_btn.on_click(_on_resume)
 
     # ── Layout ────────────────────────────────────────────────────────────────
     toolbar = pn.Row(
@@ -334,6 +518,34 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
         pn.Spacer(width=20),
         finish_btn,
     )
+    resume_row = pn.Row(
+        pn.pane.HTML('<b style="line-height:2.2;">Resume:</b>', width=80),
+        resume_input,
+        pn.Spacer(width=10),
+        resume_btn,
+    )
+
+    # ── Right panel: 3 other-channel full canvases + 4 patch thumbnails ─────────
+    # _MAIN_CH is defined above (used for canvas_fig title too); skip it here.
+    _side_canvas_figs = [f for i, f in enumerate(ch_canvas_figs) if i != _MAIN_CH]
+    _side_canvas_row  = (pn.Row(*[pn.pane.Bokeh(f) for f in _side_canvas_figs])
+                         if _side_canvas_figs else None)
+    _patch_thumb_row  = (pn.Row(*[pn.pane.Bokeh(f) for f in ch_figs])
+                         if ch_figs else None)
+
+    _right_children = []
+    if _side_canvas_row is not None:
+        _right_children.append(pn.pane.HTML('<b>Full canvas — other channels</b>'))
+        _right_children.append(_side_canvas_row)
+    if _patch_thumb_row is not None:
+        _right_children.append(pn.pane.HTML('<b>Selected patch — all channels</b>'))
+        _right_children.append(_patch_thumb_row)
+
+    if _right_children:
+        right_panel = pn.Column(*_right_children)
+        main_row = pn.Row(pn.pane.Bokeh(canvas_fig), pn.Spacer(width=100), right_panel)
+    else:
+        main_row = pn.pane.Bokeh(canvas_fig)
 
     return pn.Column(
         pn.pane.HTML(
@@ -348,15 +560,10 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
             pn.Spacer(width=20),
             img_selector,
         ),
-        pn.Row(
-            pn.pane.HTML('<b style="line-height:2.2;">Resume:</b>', width=80),
-            load_path_input,
-            pn.Spacer(width=10),
-            load_btn,
-        ),
+        resume_row,
         toolbar,
         status_md,
-        pn.pane.Bokeh(canvas_fig),
+        main_row,
     )
 
 
@@ -407,11 +614,11 @@ if __name__ == '__main__':
             return f'{args.nas_name}: {rel}'
         return ''
 
-    # Build route dict: one H5 → serve at '/', multiple → serve at '/<parent_folder>'
+    # Build route dict: one H5 → serve at '/', multiple → serve at '/<stem>'
     if len(h5_paths) == 1:
         routes = {'/': lambda h=h5_paths[0], loc=_location(h5_paths[0]): build_labeler(h, loc)}
     else:
-        routes = {f'/{Path(h).parent.name}': (lambda h=h, loc=_location(h): build_labeler(h, loc))
+        routes = {f'/{Path(h).stem}': (lambda h=h, loc=_location(h): build_labeler(h, loc))
                   for h in h5_paths}
 
     if args.serve:
