@@ -6,20 +6,23 @@ Browser-based — no programming required to use once the tool is running.
 # Datasets
 When on UChicago network, you can access these four datasets (both control and ycomp)'s FA type annotation based on paxillin and other facilitating compositions. Here are the eight links.
 
-Vinc-Pax-Zyx-Act-031125:
-Control: http://128.135.108.109:5007/vinc_control_label,
+Vinc-Pax-Zyx-Act-031125:<br>
+Control: http://128.135.108.109:5007/vinc_control_label<br>
 Ycomp: http://128.135.108.109:5007/vinc_ycomp_label
 
-pPax-Pax-Zyx-Act-072025:
-Control: http://128.135.108.109:5007/ppax_control_label,
+
+pPax-Pax-Zyx-Act-072025:<br>
+Control: http://128.135.108.109:5007/ppax_control_label<br>
 Ycomp: http://128.135.108.109:5007/ppax_ycomp_label
 
-pFAK-Pax-Zyx-Act-072125:
-Control: http://128.135.108.109:5007/pfak_control_label,
+
+pFAK-Pax-Zyx-Act-072125:<br>
+Control: http://128.135.108.109:5007/pfak_control_label <br>
 Ycomp: http://128.135.108.109:5007/pfak_ycomp_label
 
-Vinc-Pax-Zyx-Act-022726:
-Control: http://128.135.108.109:5007/nih3t3_control_label,
+
+Vinc-Pax-Zyx-Act-022726:<br>
+Control: http://128.135.108.109:5007/nih3t3_control_label<br>
 Ycomp: http://128.135.108.109:5007/nih3t3_ycomp_label  
 
 ---
@@ -37,7 +40,7 @@ Ycomp: http://128.135.108.109:5007/nih3t3_ycomp_label
 │   Paxillin — main canvas (720×720)     │  (side canvases, linked pan/zoom)      │
 │   patches shown as coloured boxes      │                                        │
 │                                        ├────────────────────────────────────────┤
-│                                        │  [paxillin] [marker] [zyxin] [actin]  │
+│                                        │  [paxillin] [marker] [zyxin] [actin]   │
 │                                        │  (patch thumbnails, on click)          │
 └────────────────────────────────────────┴────────────────────────────────────────┘
 ```
