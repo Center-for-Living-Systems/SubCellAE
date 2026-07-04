@@ -36,7 +36,7 @@ import tifffile
 import torch
 from torch.utils.data import ConcatDataset, DataLoader
 
-from subcellae.modelling.dataset import PatchDataset
+from subcellae.modelling.dataset import PatchDataset, MultiChannelPatchDataset
 from subcellae.modelling.autoencoders import AE, VAE32, SemiSupAE, ContrastiveAE
 from subcellae.pipeline.ae_pipeline import (
     _extract_group_key,
@@ -120,7 +120,7 @@ def _load_model(model_pt: Path, device: str) -> tuple:
     class name.
     """
     log.info("Loading model from %s", model_pt)
-    model = torch.load(str(model_pt), map_location=device)
+    model = torch.load(str(model_pt), map_location=device, weights_only=False)
     cls_name = type(model).__name__
     model_type = _CLASS_TO_TYPE.get(cls_name)
     if model_type is None:
@@ -198,7 +198,7 @@ def _save_reconstructions_newdata(result: dict, out_dir: Path,
         tifffile.imwrite(str(patch_dir / f"raw_{fname}"),   raw_p)
         tifffile.imwrite(str(patch_dir / f"recon_{fname}"), recon_p)
 
-        coords = _parse_patch_coords(fname)
+        coords = _parse_patch_coords(fname, path=path)
         if coords is None:
             continue
 
@@ -282,18 +282,27 @@ def run_ae_apply_pipeline(cfg: AEApplyConfig) -> Path:
 
     datasets = []
     for entry in cfg.patch_dirs:
-        path           = entry["path"]
         condition      = int(entry.get("condition", entry.get("label", 0)))
         condition_name = str(entry.get("condition_name", str(condition)))
-        ds = PatchDataset(
-            path,
-            condition=condition,
-            condition_name=condition_name,
-            annotation_file=None,
-            transform=_channel_expand,
-        )
-        log.info("  Loaded %d patches from %s  condition=%d (%s)",
-                 len(ds), path, condition, condition_name)
+        if "channel_dirs" in entry:
+            ds = MultiChannelPatchDataset(
+                entry["channel_dirs"],
+                condition=condition,
+                condition_name=condition_name,
+            )
+            log.info("  Loaded %d patches (2ch) from %s  condition=%d (%s)",
+                     len(ds), entry["channel_dirs"][0], condition, condition_name)
+        else:
+            path = entry["path"]
+            ds = PatchDataset(
+                path,
+                condition=condition,
+                condition_name=condition_name,
+                annotation_file=None,
+                transform=_channel_expand,
+            )
+            log.info("  Loaded %d patches from %s  condition=%d (%s)",
+                     len(ds), path, condition, condition_name)
         datasets.append(ds)
 
     if not datasets:

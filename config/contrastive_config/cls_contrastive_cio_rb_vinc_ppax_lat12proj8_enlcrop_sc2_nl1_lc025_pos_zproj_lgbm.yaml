@@ -1,0 +1,54 @@
+# Classification: pos | run: contrastive_cio_rb_vinc_ppax_lat12proj8_enlcrop_sc2_nl1_lc025 | features: z_proj (projector, 8-dim) | classifier: lgbm
+root_folder : "/net/projects/CLS/lding/data/fa_data_analysis"
+
+input:
+  latents_csv : "/net/projects/CLS/lding/data/fa_data_analysis/ae_results/contrastive_run/contrastive_cio_rb_vinc_ppax_lat12proj8_enlcrop_sc2_nl1_lc025/latents.csv"
+
+output:
+  out_dir : "/net/projects/CLS/lding/data/fa_data_analysis/ae_results/contrastive_run/contrastive_cio_rb_vinc_ppax_lat12proj8_enlcrop_sc2_nl1_lc025/pos_cls_zproj_lgbm"
+
+labels:
+  label_col    : "Position"
+  label_csv    : "/net/projects/CLS/lding/data/fa_data_analysis/labelling/labels_vinc_20260521.csv"
+  filename_col : "unique_ID"
+  label_order  :
+    - "Cell Protruding Edge"
+    - "Cell Periphery/other"
+    - "Lamella"
+    - "Cell Body"
+  exclude_labels:
+    - "Uncertain"
+  metrics_exclude_labels:
+    []
+
+features:
+  feature_cols          : null
+  feature_prefix        : "p_"
+  include_mean_intensity: false
+
+split:
+  strategy    : "from_csv"
+  test_size   : 0.2
+  random_state: 42
+
+classifier:
+  type : "lgbm"
+
+lightgbm:
+  n_estimators     : 500
+  learning_rate    : 0.05
+  num_leaves       : 31
+  min_child_samples: 20
+  class_weight     : "balanced"
+  n_cv_folds       : 5
+
+dist_features:
+  patch_prep_dirs: null
+  feature_weight : 20.0
+
+patch_sort:
+  sort_labelled  : true
+  sort_unlabelled: false
+
+misc:
+  log_level : "INFO"

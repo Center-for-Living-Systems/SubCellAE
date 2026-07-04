@@ -74,11 +74,14 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
             })
         else:
             # Single-channel mode (original behaviour)
-            patch_dirs.append({
+            d = {
                 "path":           str(entry["path"]),
                 "condition":      int(entry.get("condition", entry.get("label", 0))),
                 "condition_name": str(entry.get("condition_name", "")),
-            })
+            }
+            if "frame_dir" in entry:
+                d["frame_dir"] = str(entry["frame_dir"])
+            patch_dirs.append(d)
 
     # ---- output ----
     result_dir = Path(_get("output", "result_dir", "results/ae"))
@@ -146,8 +149,34 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
     recon_pad_size   = int(_get("reconstruction",  "recon_pad_size",   64))
     recon_image_size = int(_get("reconstruction",  "recon_image_size", 1024))
 
+    # ---- data loading ----
+    num_workers = int(_get("training", "num_workers", 0))
+
+    # ---- jitter crop ----
+    jitter_crop           = bool(_get("jitter_crop", "enabled",       False))
+    jitter_crop_channel   = str(_get("jitter_crop",  "channel",       "pax"))
+    jitter_crop_max_shift = int(_get("jitter_crop",  "max_shift_px",  4))
+    jitter_crop_max_angle = float(_get("jitter_crop","max_angle_deg", 15.0))
+    jitter_crop_pad_size  = int(_get("jitter_crop",  "pad_size",      64))
+
+    # ---- enlarged crop ----
+    enlarged_crop              = bool(_get("enlarged_crop",  "enabled",        False))
+    enlarged_crop_channel      = str(_get("enlarged_crop",   "channel",        "pax"))
+    enlarged_crop_context_size = int(_get("enlarged_crop",   "context_size",   58))
+    enlarged_crop_max_shift    = int(_get("enlarged_crop",   "max_shift_px",   4))
+    enlarged_crop_max_angle    = float(_get("enlarged_crop", "max_angle_deg",  15.0))
+    enlarged_crop_pad_size     = int(_get("enlarged_crop",   "pad_size",       64))
+    enlarged_crop_input_divisor = float(_get("enlarged_crop", "input_divisor", 1.0))
+
+    output_sigmoid             = bool(_get("model",          "output_sigmoid",   True))
+    recon_loss_type            = str(_get("model",           "recon_loss_type",  "mse"))
+    lambda_hessian             = float(_get("model",         "lambda_hessian",    0.0))
+
     # ---- misc ----
-    device = str(_get("misc", "device", "auto"))
+    device       = str(_get("misc", "device", "auto"))
+    hist_map_dir = _get("preprocessing", "hist_map_dir", None)
+    if hist_map_dir:
+        hist_map_dir = str(hist_map_dir)
 
     return AEConfig(
         result_dir=result_dir,
@@ -199,6 +228,23 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
         label_order_2=label_order_2,
         num_classes_2=num_classes_2,
         lambda_cls_2=lambda_cls_2,
+        hist_map_dir=hist_map_dir,
+        num_workers=num_workers,
+        jitter_crop=jitter_crop,
+        jitter_crop_channel=jitter_crop_channel,
+        jitter_crop_max_shift=jitter_crop_max_shift,
+        jitter_crop_max_angle=jitter_crop_max_angle,
+        jitter_crop_pad_size=jitter_crop_pad_size,
+        enlarged_crop=enlarged_crop,
+        enlarged_crop_channel=enlarged_crop_channel,
+        enlarged_crop_context_size=enlarged_crop_context_size,
+        enlarged_crop_max_shift=enlarged_crop_max_shift,
+        enlarged_crop_max_angle=enlarged_crop_max_angle,
+        enlarged_crop_pad_size=enlarged_crop_pad_size,
+        enlarged_crop_input_divisor=enlarged_crop_input_divisor,
+        output_sigmoid=output_sigmoid,
+        recon_loss_type=recon_loss_type,
+        lambda_hessian=lambda_hessian,
     )
 
 

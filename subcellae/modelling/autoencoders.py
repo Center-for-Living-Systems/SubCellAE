@@ -21,6 +21,7 @@ stacked ``(C, H, W)`` tensors from per-channel patch directories.
 """
 
 import os
+import copy
 import torch
 import numpy as np
 import torch.nn as nn
@@ -45,9 +46,30 @@ def normalized_mse(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     return mse / norm
 
 
+def normalized_l1(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """L1 normalised by average absolute signal (dimensionless loss)."""
+    l1 = F.l1_loss(x_hat, x, reduction="mean")
+    norm = torch.mean(x.abs()).clamp(min=1e-8)
+    return l1 / norm
+
+
+def hessian_l1_loss(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """L1 on Frobenius norm of Hessian of (x_hat - x). Penalises second-derivative
+    differences, pushing the decoder to preserve edges and fine structure."""
+    d = x_hat - x  # (B, C, H, W)
+    dIxx = d[..., 1:-1, 2:]  + d[..., 1:-1, :-2]  - 2 * d[..., 1:-1, 1:-1]
+    dIyy = d[..., 2:,  1:-1] + d[..., :-2,  1:-1] - 2 * d[..., 1:-1, 1:-1]
+    dIxy = (d[..., 2:, 2:] - d[..., 2:, :-2] - d[..., :-2, 2:] + d[..., :-2, :-2]) / 4
+    return torch.sqrt(dIxx ** 2 + 2 * dIxy ** 2 + dIyy ** 2 + 1e-8).mean()
+
+
 def salt_and_pepper_noise(x: torch.Tensor, noise_prob: float = 0.05) -> torch.Tensor:
     """
-    Apply salt-and-pepper noise to a batch of images.
+    Apply soft salt-and-pepper noise to a batch of images.
+
+    Unlike hard salt/pepper (0 and 1), corrupted pixels are set to
+    mean ± std/3 per image, keeping noise intensity close to the local
+    signal level so bright spots don't mimic nascent adhesions.
 
     Parameters
     ----------
@@ -55,9 +77,18 @@ def salt_and_pepper_noise(x: torch.Tensor, noise_prob: float = 0.05) -> torch.Te
     noise_prob : probability that any given pixel is corrupted
     """
     noisy = x.clone()
+    # Per-image mean and std, broadcast over (C, H, W)
+    mean = x.mean(dim=(-3, -2, -1), keepdim=True)   # (B, 1, 1, 1)
+    std  = x.std(dim=(-3, -2, -1), keepdim=True).clamp(min=1e-6)
+    salt_val   = (mean + std / 3.0).clamp(0.0, 1.0)
+    pepper_val = (mean - std / 3.0).clamp(0.0, 1.0)
+
     mask = torch.rand_like(x)
-    noisy[mask < noise_prob / 2] = 0.0          # pepper
-    noisy[(mask >= noise_prob / 2) & (mask < noise_prob)] = 1.0  # salt
+    pepper_mask = mask < noise_prob / 2
+    salt_mask   = (mask >= noise_prob / 2) & (mask < noise_prob)
+
+    noisy[pepper_mask] = pepper_val.expand_as(noisy)[pepper_mask]
+    noisy[salt_mask]   = salt_val.expand_as(noisy)[salt_mask]
     return noisy
 
 
@@ -75,6 +106,47 @@ def intensity_scale(x: torch.Tensor, scale_range: tuple = (0.8, 1.2)) -> torch.T
     # One scale factor per image, broadcast over C, H, W
     scale = torch.empty(x.size(0), 1, 1, 1, device=x.device).uniform_(lo, hi)
     return (x * scale).clamp(0.0, 1.0)
+
+
+def _jitter_rot_crop(
+    x: torch.Tensor,
+    max_shift_px: int,
+    max_angle_deg: float,
+    out_size: int,
+) -> torch.Tensor:
+    """GPU-native random rotation + translation + center crop per image.
+
+    Input:  (B, C, H, W) — enlarged context; H = W must be >= 2*ceil(sqrt(2)*(out_size/2 + max_shift_px))
+    Output: (B, C, out_size, out_size)
+
+    Each image in the batch gets **independent** random angle in
+    [−max_angle_deg, +max_angle_deg] and translation (dx, dy) with
+    dx, dy ∈ [−max_shift_px, +max_shift_px].  The combined affine is applied
+    as a single bilinear interpolation via affine_grid + grid_sample.
+    """
+    B, C, H, W = x.shape
+    device = x.device
+
+    angles = torch.empty(B, device=device).uniform_(-max_angle_deg, max_angle_deg)
+    dx = torch.randint(-max_shift_px, max_shift_px + 1, (B,), device=device).float()
+    dy = torch.randint(-max_shift_px, max_shift_px + 1, (B,), device=device).float()
+
+    cos_a = torch.cos(torch.deg2rad(angles))
+    sin_a = torch.sin(torch.deg2rad(angles))
+
+    # Affine matrix maps output normalized coords → input normalized coords.
+    # Scale s = out_size/H centres the crop to out_size×out_size.
+    # Translation: 2*dx/W shifts the crop centre by dx pixels in input space.
+    s  = out_size / H
+    tx = 2.0 * dx / W
+    ty = 2.0 * dy / H
+
+    row1  = torch.stack([ cos_a * s,  sin_a * s, tx], dim=1)
+    row2  = torch.stack([-sin_a * s,  cos_a * s, ty], dim=1)
+    theta = torch.stack([row1, row2], dim=1)  # (B, 2, 3)
+
+    grid = F.affine_grid(theta, size=(B, C, out_size, out_size), align_corners=False)
+    return F.grid_sample(x, grid, mode='bilinear', padding_mode='border', align_corners=False)
 
 
 def augment_contrastive_view(
@@ -147,12 +219,17 @@ def augment_contrastive_view(
     return out
 
 
-def plot_reconstruction_progress(model, dataloader, device, epoch, vae_mode=False):
+def plot_reconstruction_progress(model, dataloader, device, epoch, vae_mode=False, patch_size: int | None = None):
     """Show original vs. reconstructed patches for one batch."""
     model.eval()
     with torch.no_grad():
         for batch in dataloader:
             x = batch[0].to(device)
+            if patch_size is not None and x.shape[-1] != patch_size:
+                h, w = x.shape[-2:]
+                top  = (h - patch_size) // 2
+                left = (w - patch_size) // 2
+                x = x[:, :, top:top+patch_size, left:left+patch_size]
             if vae_mode:
                 recon = model(x)[0]        # xhat, mu, logvar, z
             else:
@@ -169,13 +246,14 @@ def plot_reconstruction_progress(model, dataloader, device, epoch, vae_mode=Fals
 
     n = min(16, x.size(0))
     idx = torch.randperm(x.size(0))[:n]
+    vmax = max(float(torch.quantile(x, 0.95)), float(torch.quantile(recon, 0.95)), 1e-3)
     fig, axes = plt.subplots(2, n, figsize=(n, 2))
     for col, i in enumerate(idx):
-        axes[0, col].imshow(_to_display(x[i]), cmap="gray", vmin=0, vmax=1)
+        axes[0, col].imshow(_to_display(x[i]), cmap="gray", vmin=0, vmax=vmax)
         axes[0, col].axis("off")
-        axes[1, col].imshow(_to_display(recon[i]), cmap="gray", vmin=0, vmax=1)
+        axes[1, col].imshow(_to_display(recon[i]), cmap="gray", vmin=0, vmax=vmax)
         axes[1, col].axis("off")
-    plt.suptitle(f"Reconstruction @ epoch {epoch}")
+    plt.suptitle(f"Reconstruction @ epoch {epoch}  (vmax={vmax:.2f})")
     plt.tight_layout()
     return fig
 
@@ -289,13 +367,18 @@ def train_ae(model, train_loader, val_loader, device, epochs, lr,
              loss_norm_flag, result_dir,
              weight_decay=0.0,
              lr_scheduler="none", lr_scheduler_patience=20,
-             lr_scheduler_factor=0.5, lr_min=1e-6):
+             lr_scheduler_factor=0.5, lr_min=1e-6,
+             enlarged_crop_max_shift: int = 0,
+             enlarged_crop_max_angle: float = 0.0,
+             patch_size: int = 32):
     """Training loop for the standard AE."""
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     loss_fn = normalized_mse if loss_norm_flag else nn.MSELoss()
 
     scheduler = _make_scheduler(optimizer, lr_scheduler, epochs,
                                 lr_scheduler_patience, lr_scheduler_factor, lr_min)
+
+    use_enlcrop = enlarged_crop_max_shift > 0 or enlarged_crop_max_angle > 0.0
 
     train_losses, val_losses = [], []
     error_print_period = max(1, epochs // 50)
@@ -306,6 +389,8 @@ def train_ae(model, train_loader, val_loader, device, epochs, lr,
         t_loss = 0.0
         for x, *_ in train_loader:
             x = x.to(device)
+            if use_enlcrop:
+                x = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
             recon, _ = model(x)
             loss = loss_fn(recon, x)
             optimizer.zero_grad(); loss.backward(); optimizer.step()
@@ -318,6 +403,8 @@ def train_ae(model, train_loader, val_loader, device, epochs, lr,
         with torch.no_grad():
             for x, *_ in val_loader:
                 x = x.to(device)
+                if use_enlcrop:
+                    x = _jitter_rot_crop(x, 0, 0.0, patch_size)
                 recon, _ = model(x)
                 v_loss += loss_fn(recon, x).item()
         v_loss /= len(val_loader)
@@ -330,7 +417,7 @@ def train_ae(model, train_loader, val_loader, device, epochs, lr,
             print(f"AE  epoch {epoch+1}/{epochs}  train={t_loss:.4f}  val={v_loss:.4f}  lr={current_lr:.2e}")
 
         if (epoch + 1) % recon_view_period == 0:
-            fig = plot_reconstruction_progress(model, val_loader, device, epoch + 1)
+            fig = plot_reconstruction_progress(model, val_loader, device, epoch + 1, patch_size=patch_size)
             fig.savefig(os.path.join(result_dir, f"ae_recon_ep{epoch+1}.png"))
             plt.close(fig)
             torch.save(model, os.path.join(result_dir, f"ae_model_ep{epoch+1}.pt"))
@@ -1028,6 +1115,7 @@ class ContrastiveAE(nn.Module):
         no_ch: int       = 1,
         noise_prob: float = 0.05,
         BN_flag: bool    = True,
+        output_sigmoid: bool = True,
     ):
         super().__init__()
 
@@ -1057,14 +1145,16 @@ class ContrastiveAE(nn.Module):
             nn.Linear(latent_dim, 1024), nn.LeakyReLU(0.01),
             nn.Linear(1024, flat),
         )
-        self.decoder = nn.Sequential(
+        _decoder_layers = [
             nn.ConvTranspose2d(128, 64,   3, stride=2, padding=1, output_padding=1),
             maybe_bn(64), nn.LeakyReLU(0.01),
             nn.ConvTranspose2d(64, 32,    3, stride=2, padding=1, output_padding=1),
             maybe_bn(32), nn.LeakyReLU(0.01),
             nn.ConvTranspose2d(32, no_ch, 3, stride=2, padding=1, output_padding=1),
-            nn.Sigmoid(),  # output in (0,1); always has non-zero gradient (avoids Hardtanh dead zone on sparse patches)
-        )
+        ]
+        if output_sigmoid:
+            _decoder_layers.append(nn.Sigmoid())
+        self.decoder = nn.Sequential(*_decoder_layers)
 
         # ---------- projection head (for contrastive loss only) ----------
         proj_hidden = latent_dim * 4  # scales with representation size
@@ -1199,6 +1289,8 @@ def contrastive_ae_loss(
     lambda_recon: float    = 1.0,
     lambda_contrast: float = 0.5,
     temperature: float     = 0.5,
+    recon_loss_type: str   = "mse",
+    lambda_hessian: float  = 0.0,
 ):
     """
     Combined reconstruction + NT-Xent contrastive loss.
@@ -1207,7 +1299,16 @@ def contrastive_ae_loss(
     -------
     total_loss, recon_loss, contrast_loss
     """
-    recon_loss    = F.mse_loss(recon, x, reduction="mean")
+    if recon_loss_type == "l1":
+        recon_loss = F.l1_loss(recon, x, reduction="mean")
+    elif recon_loss_type == "nmse":
+        recon_loss = normalized_mse(recon, x)
+    elif recon_loss_type == "nl1":
+        recon_loss = normalized_l1(recon, x)
+    else:
+        recon_loss = F.mse_loss(recon, x, reduction="mean")
+    if lambda_hessian > 0.0:
+        recon_loss = recon_loss + lambda_hessian * hessian_l1_loss(recon, x)
     contrast_loss = nt_xent_loss(proj_clean, proj_aug, temperature)
     total         = lambda_recon * recon_loss + lambda_contrast * contrast_loss
     return total, recon_loss, contrast_loss
@@ -1228,6 +1329,16 @@ def train_contrastive_ae(
     temperature: float           = 0.5,
     use_flip: bool               = False,
     intensity_scale_range: tuple | None = None,
+    weight_decay: float          = 0.0,
+    warmup_epochs: int           = 0,
+    min_epochs_for_best: int     = 0,
+    lr_scheduler: str            = "none",
+    lr_min: float                = 1e-6,
+    patch_size: int              = 32,
+    enlarged_crop_max_shift: int = 0,
+    enlarged_crop_max_angle: float = 0.0,
+    recon_loss_type: str         = "mse",
+    lambda_hessian: float        = 0.0,
 ):
     """
     Training loop for ContrastiveAE (self-supervised NT-Xent).
@@ -1246,38 +1357,70 @@ def train_contrastive_ae(
                             default "rot90" for random 90° rotations
     noise_prob            : optional salt-and-pepper corruption probability
     intensity_scale_range : optional per-image intensity scaling range
+    weight_decay          : L2 regularisation on all weights
+    warmup_epochs         : recon-only phase (lambda_contrast=0) before
+                            contrastive loss activates; LR is reset at transition
+    min_epochs_for_best   : ignore best-checkpoint tracking before this epoch
+    lr_scheduler          : "none" | "cosine" | "plateau"
     """
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    def _make_ct_scheduler():
+        return _make_scheduler(optimizer, lr_scheduler, epochs,
+                               patience=10, factor=0.5, lr_min=lr_min)
+
+    scheduler = _make_ct_scheduler()
 
     train_losses, val_losses     = [], []
     train_recon, train_contrast  = [], []
     val_recon,   val_contrast    = [], []
 
+    best_val_loss = float("inf")
+    best_state    = None
+    best_epoch    = 0
+
     error_print_period = max(1, epochs // 50)
     recon_view_period  = max(1, epochs // 10)
 
+    # Fix display indices once so the same patches appear at every checkpoint
+    _viz_batch = next(iter(val_loader))[0]
+    _n_show = min(24, _viz_batch.size(0))
+    torch.manual_seed(0)
+    _viz_idx = torch.randperm(_viz_batch.size(0))[:_n_show]
+
     for epoch in range(epochs):
+        in_warmup = warmup_epochs > 0 and epoch < warmup_epochs
+        eff_lambda_contrast = 0.0 if in_warmup else lambda_contrast
+
         model.train()
         tl = tr = tc = 0.0
 
         for batch in train_loader:
             x = batch[0].to(device)
 
-            # --- two views ---
-            x_aug = augment_contrastive_view(x, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
+            # --- two views (enlarged-crop or standard path) ---
+            if x.shape[-1] > patch_size:
+                view1 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
+                view2 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
+                view2 = augment_contrastive_view(view2, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
+            else:
+                view1 = x
+                view2 = augment_contrastive_view(x, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
 
-            z_clean = model.encode(x)
-            z_aug = model.encode(x_aug)
+            z_clean = model.encode(view1)
+            z_aug   = model.encode(view2)
 
             recon      = model.decode(z_clean)
             proj_clean = model.project(z_clean)
-            proj_aug = model.project(z_aug)
+            proj_aug   = model.project(z_aug)
 
             loss, rl, cl = contrastive_ae_loss(
-                x, recon, proj_clean, proj_aug,
+                view1, recon, proj_clean, proj_aug,
                 lambda_recon=lambda_recon,
-                lambda_contrast=lambda_contrast,
+                lambda_contrast=eff_lambda_contrast,
                 temperature=temperature,
+                recon_loss_type=recon_loss_type,
+                lambda_hessian=lambda_hessian,
             )
             optimizer.zero_grad(); loss.backward(); optimizer.step()
             tl += loss.item(); tr += rl.item(); tc += cl.item()
@@ -1291,20 +1434,28 @@ def train_contrastive_ae(
         with torch.no_grad():
             for batch in val_loader:
                 x = batch[0].to(device)
-                x_aug = augment_contrastive_view(x, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
+                if x.shape[-1] > patch_size:
+                    view1 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
+                    view2 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
+                    view2 = augment_contrastive_view(view2, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
+                else:
+                    view1 = x
+                    view2 = augment_contrastive_view(x, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
 
-                z_clean = model.encode(x)
-                z_aug = model.encode(x_aug)
+                z_clean = model.encode(view1)
+                z_aug   = model.encode(view2)
 
                 recon      = model.decode(z_clean)
                 proj_clean = model.project(z_clean)
-                proj_aug = model.project(z_aug)
+                proj_aug   = model.project(z_aug)
 
                 loss, rl, cl = contrastive_ae_loss(
-                    x, recon, proj_clean, proj_aug,
+                    view1, recon, proj_clean, proj_aug,
                     lambda_recon=lambda_recon,
-                    lambda_contrast=lambda_contrast,
+                    lambda_contrast=eff_lambda_contrast,
                     temperature=temperature,
+                    recon_loss_type=recon_loss_type,
+                    lambda_hessian=lambda_hessian,
                 )
                 vl += loss.item(); vr += rl.item(); vc += cl.item()
 
@@ -1312,46 +1463,81 @@ def train_contrastive_ae(
         vl /= n; vr /= n; vc /= n
         val_losses.append(vl); val_recon.append(vr); val_contrast.append(vc)
 
+        # LR scheduler: skip during warmup; reset at transition
+        if not in_warmup and scheduler is not None:
+            _step_scheduler(scheduler, lr_scheduler, vl)
+        elif epoch + 1 == warmup_epochs:
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr
+            scheduler = _make_ct_scheduler()
+            print(f"Contrastive  warmup complete — LR reset to {lr:.2e}"
+                  + (", scheduler restarted" if scheduler is not None else ", no scheduler"))
+
+        # Best-checkpoint tracking (only after warmup ends and min_epochs_for_best)
+        past_warmup = (epoch + 1) > warmup_epochs
+        if past_warmup and (epoch + 1) >= max(min_epochs_for_best, 1) and vl < best_val_loss:
+            best_val_loss = vl
+            best_epoch    = epoch + 1
+            best_state    = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+
         if (epoch + 1) % error_print_period == 0:
+            phase_str = " [warmup]" if in_warmup else ""
             print(
-                f"Contrastive  epoch {epoch+1}/{epochs} | "
+                f"Contrastive  epoch {epoch+1}/{epochs}{phase_str} | "
                 f"train total={tl:.4f} recon={tr:.4f} contrast={tc:.4f} | "
-                f"val   total={vl:.4f} recon={vr:.4f} contrast={vc:.4f}"
+                f"val   total={vl:.4f} recon={vr:.4f} contrast={vc:.4f}",
+                flush=True,
             )
 
         if (epoch + 1) % recon_view_period == 0:
-            fig = plot_reconstruction_progress(model, val_loader, device, epoch + 1)
+            fig = plot_reconstruction_progress(model, val_loader, device, epoch + 1, patch_size=patch_size)
             fig.savefig(os.path.join(result_dir, f"contrastive_recon_ep{epoch+1}.png"))
             plt.close(fig)
 
-            # Also visualise clean vs augmented vs recon side-by-side
+            # Visualise recon / view1 / view2 (fixed patches across epochs)
             model.eval()
             with torch.no_grad():
                 for batch in val_loader:
                     x = batch[0].to(device)
-                    x_aug = augment_contrastive_view(x, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
-                    recon, _ = model(x)
-                    x = x.cpu(); x_aug = x_aug.cpu(); recon = recon.cpu()
+                    if x.shape[-1] > patch_size:
+                        view1 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
+                        view2 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
+                        view2 = augment_contrastive_view(view2, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
+                    else:
+                        view1 = x
+                        view2 = augment_contrastive_view(x, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
+                    recon, _ = model(view1)
+                    view1 = view1.cpu(); view2 = view2.cpu(); recon = recon.cpu()
                     break
 
-            n_show = min(16, x.size(0))
-            idx = torch.randperm(x.size(0))[:n_show]
-            fig2, axes = plt.subplots(3, n_show, figsize=(n_show, 3))
-            for col, i in enumerate(idx):
-                axes[0, col].imshow(x[i].squeeze(),     cmap="gray", vmin=0, vmax=1)
+            vmax = max(float(torch.quantile(view1, 0.95)), float(torch.quantile(recon, 0.95)), 1e-3)
+            fig2, axes = plt.subplots(3, _n_show, figsize=(_n_show, 3))
+            for col, i in enumerate(_viz_idx):
+                axes[0, col].imshow(recon[i][0],  cmap="gray", vmin=0, vmax=vmax)
                 axes[0, col].axis("off")
-                axes[1, col].imshow(x_aug[i].squeeze(), cmap="gray", vmin=0, vmax=1)
+                axes[1, col].imshow(view1[i][0],  cmap="gray", vmin=0, vmax=vmax)
                 axes[1, col].axis("off")
-                axes[2, col].imshow(recon[i].squeeze(), cmap="gray", vmin=0, vmax=1)
+                axes[2, col].imshow(view2[i][0],  cmap="gray", vmin=0, vmax=vmax)
                 axes[2, col].axis("off")
-            axes[0, 0].set_ylabel("clean",  fontsize=7)
-            axes[1, 0].set_ylabel("aug",    fontsize=7)
-            axes[2, 0].set_ylabel("recon",  fontsize=7)
-            plt.suptitle(f"Contrastive AE @ epoch {epoch+1}")
+            axes[0, 0].set_ylabel("recon",  fontsize=7)
+            axes[1, 0].set_ylabel("view1",  fontsize=7)
+            axes[2, 0].set_ylabel("view2",  fontsize=7)
+            plt.suptitle(f"Contrastive AE @ epoch {epoch+1}  (vmax={vmax:.2f})")
             plt.tight_layout()
             fig2.savefig(os.path.join(result_dir, f"contrastive_views_ep{epoch+1}.png"))
             plt.close(fig2)
             torch.save(model, os.path.join(result_dir, f"contrastive_model_ep{epoch+1}.pt"))
+
+    # Save best checkpoint
+    if best_state is not None:
+        best_model = copy.deepcopy(model)
+        best_model.load_state_dict(best_state)
+        torch.save(best_model, os.path.join(result_dir, "model_best.pt"))
+        print(f"Contrastive  best checkpoint: epoch {best_epoch}  val_loss={best_val_loss:.4f}")
+    else:
+        best_model = model
+
+    torch.save(model, os.path.join(result_dir, "model_final.pt"))
 
     for name, arr in [
         ("ct_train_total",    train_losses),   ("ct_val_total",    val_losses),
@@ -1362,7 +1548,12 @@ def train_contrastive_ae(
 
     _save_loss_curves(train_losses, val_losses, epochs,
                       "Contrastive AE Total Loss", result_dir, "contrastive")
-    return model, train_losses, val_losses
+    _save_contrastive_component_curves(
+        train_recon, val_recon, train_contrast, val_contrast,
+        train_losses, val_losses, result_dir,
+        prefix="contrastive", title="Contrastive AE",
+    )
+    return best_model, train_losses, val_losses
 
 
 def train_supervised_contrastive_ae(
@@ -1380,6 +1571,16 @@ def train_supervised_contrastive_ae(
     temperature: float = 0.5,
     use_flip: bool     = False,
     intensity_scale_range: tuple | None = None,
+    weight_decay: float          = 0.0,
+    warmup_epochs: int           = 0,
+    min_epochs_for_best: int     = 0,
+    lr_scheduler: str            = "none",
+    lr_min: float                = 1e-6,
+    patch_size: int              = 32,
+    enlarged_crop_max_shift: int = 0,
+    enlarged_crop_max_angle: float = 0.0,
+    recon_loss_type: str         = "mse",
+    lambda_hessian: float        = 0.0,
 ):
     """
     Training loop for ContrastiveAE with Supervised Contrastive loss (SupCon).
@@ -1398,16 +1599,34 @@ def train_supervised_contrastive_ae(
     noise_prob   : salt-and-pepper corruption probability for the augmented view
     temperature  : softmax temperature for the SupCon loss
     """
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    def _make_sc_scheduler():
+        return _make_scheduler(optimizer, lr_scheduler, epochs,
+                               patience=10, factor=0.5, lr_min=lr_min)
+
+    scheduler = _make_sc_scheduler()
 
     train_losses, val_losses    = [], []
     train_recon, train_contrast = [], []
     val_recon,   val_contrast   = [], []
 
+    best_val_loss = float("inf")
+    best_state    = None
+    best_epoch    = 0
+
     error_print_period = max(1, epochs // 50)
     recon_view_period  = max(1, epochs // 10)
 
+    # Fix display indices once so the same patches appear at every checkpoint
+    _viz_batch = next(iter(val_loader))[0]
+    _n_show = min(24, _viz_batch.size(0))
+    torch.manual_seed(0)
+    _viz_idx = torch.randperm(_viz_batch.size(0))[:_n_show]
+
     for epoch in range(epochs):
+        in_warmup = warmup_epochs > 0 and epoch < warmup_epochs
+        eff_lambda_contrast = 0.0 if in_warmup else lambda_contrast
         model.train()
         tl = tr = tc = 0.0
 
@@ -1415,10 +1634,16 @@ def train_supervised_contrastive_ae(
             x      = batch[0].to(device)
             labels = batch[2].to(device)   # annotation_label; -1 if unlabeled
 
-            x_aug = augment_contrastive_view(x, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
+            if x.shape[-1] > patch_size:
+                view1 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
+                view2 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
+                view2 = augment_contrastive_view(view2, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
+            else:
+                view1 = x
+                view2 = augment_contrastive_view(x, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
 
-            z1 = model.encode(x)
-            z2 = model.encode(x_aug)
+            z1 = model.encode(view1)
+            z2 = model.encode(view2)
 
             recon      = model.decode(z1)
             proj1      = model.project(z1)
@@ -1428,9 +1653,18 @@ def train_supervised_contrastive_ae(
             proj_all   = torch.cat([proj1, proj2], dim=0)              # (2N, D)
             labels_all = torch.cat([labels, labels], dim=0)            # (2N,)
 
-            rl = F.mse_loss(recon, x, reduction="mean")
+            if recon_loss_type == "l1":
+                rl = F.l1_loss(recon, view1, reduction="mean")
+            elif recon_loss_type == "nmse":
+                rl = normalized_mse(recon, view1)
+            elif recon_loss_type == "nl1":
+                rl = normalized_l1(recon, view1)
+            else:
+                rl = F.mse_loss(recon, view1, reduction="mean")
+            if lambda_hessian > 0.0:
+                rl = rl + lambda_hessian * hessian_l1_loss(recon, view1)
             cl = supcon_loss(proj_all, labels_all, temperature=temperature)
-            loss = lambda_recon * rl + lambda_contrast * cl
+            loss = lambda_recon * rl + eff_lambda_contrast * cl
 
             optimizer.zero_grad(); loss.backward(); optimizer.step()
             tl += loss.item(); tr += rl.item(); tc += cl.item()
@@ -1445,10 +1679,16 @@ def train_supervised_contrastive_ae(
             for batch in val_loader:
                 x      = batch[0].to(device)
                 labels = batch[2].to(device)
-                x_aug  = augment_contrastive_view(x, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
+                if x.shape[-1] > patch_size:
+                    view1 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
+                    view2 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
+                    view2 = augment_contrastive_view(view2, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
+                else:
+                    view1 = x
+                    view2 = augment_contrastive_view(x, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
 
-                z1 = model.encode(x)
-                z2 = model.encode(x_aug)
+                z1 = model.encode(view1)
+                z2 = model.encode(view2)
 
                 recon      = model.decode(z1)
                 proj1      = model.project(z1)
@@ -1457,9 +1697,18 @@ def train_supervised_contrastive_ae(
                 proj_all   = torch.cat([proj1, proj2], dim=0)
                 labels_all = torch.cat([labels, labels], dim=0)
 
-                rl = F.mse_loss(recon, x, reduction="mean")
+                if recon_loss_type == "l1":
+                    rl = F.l1_loss(recon, view1, reduction="mean")
+                elif recon_loss_type == "nmse":
+                    rl = normalized_mse(recon, view1)
+                elif recon_loss_type == "nl1":
+                    rl = normalized_l1(recon, view1)
+                else:
+                    rl = F.mse_loss(recon, view1, reduction="mean")
+                if lambda_hessian > 0.0:
+                    rl = rl + lambda_hessian * hessian_l1_loss(recon, view1)
                 cl = supcon_loss(proj_all, labels_all, temperature=temperature)
-                loss = lambda_recon * rl + lambda_contrast * cl
+                loss = lambda_recon * rl + eff_lambda_contrast * cl
 
                 vl += loss.item(); vr += rl.item(); vc += cl.item()
 
@@ -1467,15 +1716,35 @@ def train_supervised_contrastive_ae(
         vl /= n; vr /= n; vc /= n
         val_losses.append(vl); val_recon.append(vr); val_contrast.append(vc)
 
+        # LR scheduler: skip during warmup; reset at transition
+        if not in_warmup and scheduler is not None:
+            _step_scheduler(scheduler, lr_scheduler, vl)
+        elif epoch + 1 == warmup_epochs:
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr
+            scheduler = _make_sc_scheduler()
+            print(f"SupCon AE  warmup complete — LR reset to {lr:.2e}"
+                  + (", scheduler restarted" if scheduler is not None else ", no scheduler"),
+                  flush=True)
+
+        # Best-checkpoint tracking (only after warmup ends and min_epochs_for_best)
+        past_warmup = (epoch + 1) > warmup_epochs
+        if past_warmup and (epoch + 1) >= max(min_epochs_for_best, 1) and vl < best_val_loss:
+            best_val_loss = vl
+            best_epoch    = epoch + 1
+            best_state    = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+
         if (epoch + 1) % error_print_period == 0:
+            phase_str = " [warmup]" if in_warmup else ""
             print(
-                f"SupCon AE  epoch {epoch+1}/{epochs} | "
+                f"SupCon AE  epoch {epoch+1}/{epochs}{phase_str} | "
                 f"train total={tl:.4f} recon={tr:.4f} contrast={tc:.4f} | "
-                f"val   total={vl:.4f} recon={vr:.4f} contrast={vc:.4f}"
+                f"val   total={vl:.4f} recon={vr:.4f} contrast={vc:.4f}",
+                flush=True,
             )
 
         if (epoch + 1) % recon_view_period == 0:
-            fig = plot_reconstruction_progress(model, val_loader, device, epoch + 1)
+            fig = plot_reconstruction_progress(model, val_loader, device, epoch + 1, patch_size=patch_size)
             fig.savefig(os.path.join(result_dir, f"supcon_recon_ep{epoch+1}.png"))
             plt.close(fig)
 
@@ -1483,29 +1752,46 @@ def train_supervised_contrastive_ae(
             with torch.no_grad():
                 for batch in val_loader:
                     x     = batch[0].to(device)
-                    x_aug = augment_contrastive_view(x, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
-                    recon, _ = model(x)
-                    x = x.cpu(); x_aug = x_aug.cpu(); recon = recon.cpu()
+                    if x.shape[-1] > patch_size:
+                        view1 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
+                        view2 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
+                        view2 = augment_contrastive_view(view2, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
+                    else:
+                        view1 = x
+                        view2 = augment_contrastive_view(x, rotation_mode=rotation_mode, use_flip=use_flip, noise_prob=noise_prob, intensity_scale_range=intensity_scale_range)
+                    recon, _ = model(view1)
+                    view1 = view1.cpu(); view2 = view2.cpu(); recon = recon.cpu()
                     break
 
-            n_show = min(16, x.size(0))
-            idx = torch.randperm(x.size(0))[:n_show]
-            fig2, axes = plt.subplots(3, n_show, figsize=(n_show, 3))
-            for col, i in enumerate(idx):
-                axes[0, col].imshow(x[i].squeeze(),     cmap="gray", vmin=0, vmax=1)
+            vmax = max(float(torch.quantile(view1, 0.95)), float(torch.quantile(recon, 0.95)), 1e-3)
+            fig2, axes = plt.subplots(3, _n_show, figsize=(_n_show, 3))
+            for col, i in enumerate(_viz_idx):
+                axes[0, col].imshow(recon[i][0],  cmap="gray", vmin=0, vmax=vmax)
                 axes[0, col].axis("off")
-                axes[1, col].imshow(x_aug[i].squeeze(), cmap="gray", vmin=0, vmax=1)
+                axes[1, col].imshow(view1[i][0],  cmap="gray", vmin=0, vmax=vmax)
                 axes[1, col].axis("off")
-                axes[2, col].imshow(recon[i].squeeze(), cmap="gray", vmin=0, vmax=1)
+                axes[2, col].imshow(view2[i][0],  cmap="gray", vmin=0, vmax=vmax)
                 axes[2, col].axis("off")
-            axes[0, 0].set_ylabel("clean", fontsize=7)
-            axes[1, 0].set_ylabel("aug",   fontsize=7)
-            axes[2, 0].set_ylabel("recon", fontsize=7)
-            plt.suptitle(f"SupCon AE @ epoch {epoch+1}")
+            axes[0, 0].set_ylabel("recon",  fontsize=7)
+            axes[1, 0].set_ylabel("view1",  fontsize=7)
+            axes[2, 0].set_ylabel("view2",  fontsize=7)
+            plt.suptitle(f"SupCon AE @ epoch {epoch+1}  (vmax={vmax:.2f})")
             plt.tight_layout()
             fig2.savefig(os.path.join(result_dir, f"supcon_views_ep{epoch+1}.png"))
             plt.close(fig2)
             torch.save(model, os.path.join(result_dir, f"supcon_model_ep{epoch+1}.pt"))
+
+    # Save best checkpoint
+    if best_state is not None:
+        best_model = copy.deepcopy(model)
+        best_model.load_state_dict(best_state)
+        torch.save(best_model, os.path.join(result_dir, "model_best.pt"))
+        print(f"SupCon AE  best checkpoint: epoch {best_epoch}  val_loss={best_val_loss:.4f}",
+              flush=True)
+    else:
+        best_model = model
+
+    torch.save(model, os.path.join(result_dir, "model_final.pt"))
 
     for name, arr in [
         ("sc_train_total",    train_losses),   ("sc_val_total",    val_losses),
@@ -1516,7 +1802,12 @@ def train_supervised_contrastive_ae(
 
     _save_loss_curves(train_losses, val_losses, epochs,
                       "SupCon AE Total Loss", result_dir, "supcon")
-    return model, train_losses, val_losses
+    _save_contrastive_component_curves(
+        train_recon, val_recon, train_contrast, val_contrast,
+        train_losses, val_losses, result_dir,
+        prefix="supcon", title="SupCon AE",
+    )
+    return best_model, train_losses, val_losses
 
 
 # =============================================================================
@@ -1580,4 +1871,37 @@ def _save_semisup_component_curves(
     fig.suptitle("SemiSup AE – component losses", fontweight="bold")
     fig.tight_layout()
     fig.savefig(os.path.join(result_dir, "semisup_component_losses.png"), dpi=150)
+    plt.close(fig)
+
+
+def _save_contrastive_component_curves(
+    train_recon, val_recon,
+    train_contrast, val_contrast,
+    train_total, val_total,
+    result_dir: str,
+    prefix: str = "contrastive",
+    title: str  = "Contrastive AE",
+):
+    """Three-panel loss figure: total | reconstruction | contrastive."""
+    epochs = len(train_total)
+    xs = range(epochs)
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4), sharey=False)
+
+    panels = [
+        (axes[0], train_total,    val_total,    "Total loss"),
+        (axes[1], train_recon,    val_recon,    "Reconstruction (MSE)"),
+        (axes[2], train_contrast, val_contrast, "Contrastive loss"),
+    ]
+    for ax, tr, va, subtitle in panels:
+        ax.plot(xs, tr, label="Train")
+        ax.plot(xs, va, label="Val")
+        ax.set_title(subtitle)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.legend()
+
+    fig.suptitle(f"{title} – component losses", fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(os.path.join(result_dir, f"{prefix}_component_losses.png"), dpi=150)
     plt.close(fig)

@@ -43,7 +43,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import ConcatDataset, DataLoader, Subset, random_split
 
-from subcellae.modelling.dataset import PatchDataset, MultiChannelPatchDataset
+from subcellae.modelling.dataset import PatchDataset, MultiChannelPatchDataset, JitterCropDataset, EnlargedCropDataset, MultiChannelEnlargedCropDataset
 from subcellae.modelling.autoencoders import (
     AE, train_ae,
     VAE32, train_vae,
@@ -221,6 +221,44 @@ class AEConfig:
     # --- device ---
     device: str = "auto"
 
+    # --- data loading ---
+    num_workers: int = 0   # DataLoader worker processes; set >0 when __getitem__ is CPU-heavy
+
+    # --- histogram matching ---
+    # Path to directory containing {dataset}_map.npz files produced by
+    # scripts/compute_histogram_maps.py.  If set, each patch_dir will have
+    # histogram matching applied automatically (dataset name auto-detected
+    # from the path: .../cio_rb/<dataset>/...).
+    hist_map_dir: str | None = None
+
+    # --- jitter crop (on-the-fly augmentation from source frame TIFFs) ---
+    # When enabled, each patch_dirs entry must supply a "frame_dir" key pointing
+    # to the directory of per-channel source frame TIFFs produced by
+    # run_frameextract_from_config.py  (e.g. ae_results/source_frames/cio_rb/vinc/control).
+    jitter_crop: bool            = False
+    jitter_crop_channel: str     = "pax"   # channel name used in frame TIFF filenames
+    jitter_crop_max_shift: int   = 4       # max translation jitter (px each direction)
+    jitter_crop_max_angle: float = 15.0    # max rotation (degrees)
+    jitter_crop_pad_size: int    = 64      # patchprep padding offset in patch coordinates
+
+    # --- enlarged crop (context-only crop; jitter+rotation done per-view in training loop) ---
+    # Returns (1, context_size, context_size) patch with no augmentation at load time.
+    # The training loop calls _jitter_rot_crop independently for each contrastive view,
+    # enabling true per-view translation + rotation diversity in a single bilinear pass.
+    # context_size formula: 2 * ceil(sqrt(2) * (input_ps/2 + max_shift_px))
+    # For input_ps=32, max_shift=4: context_size=58.
+    enlarged_crop: bool              = False
+    enlarged_crop_channel: str       = "pax"
+    enlarged_crop_context_size: int  = 58
+    enlarged_crop_max_shift: int     = 4
+    enlarged_crop_max_angle: float   = 15.0
+    enlarged_crop_pad_size: int      = 64
+    enlarged_crop_input_divisor: float = 1.0
+
+    output_sigmoid: bool             = True
+    recon_loss_type: str             = "mse"   # "mse", "l1", "nmse", "nl1"
+    lambda_hessian: float            = 0.0     # additive Hessian-L1 regulariser weight
+
     def __post_init__(self):
         # Coerce and create result_dir
         self.result_dir = Path(self.result_dir)
@@ -246,14 +284,23 @@ def _extract_group_key(path: str) -> str:
     """Return the image-level group key from a patch filename.
 
     Filename format: ``{prefix}_f{NNNN}x{xxxx}y{yyyy}ps{pp}.tif``
-    Group key      : ``{prefix}_f{NNNN}``
+    Group key      : ``{dataset}_{prefix}_f{NNNN}``
 
-    Example: ``control_f0001x0592y0560ps32.tif`` → ``control_f0001``
+    The dataset prefix is the directory two levels above the patch dir
+    (e.g. .../vinc/control/tiff_patches32_mr10/fname → "vinc").
+    This prevents frames from different datasets with the same filename
+    (e.g. vinc control_f0001 vs ppax control_f0001) from being merged.
     Falls back to the full stem if the pattern is not matched.
     """
     stem = Path(path).stem   # strip .tif
     m = re.match(r'^(.+_f\d+)x\d+', stem)
-    return m.group(1) if m else stem
+    frame_group = m.group(1) if m else stem
+    # dataset prefix: grandparent of the patch directory
+    try:
+        dataset_prefix = Path(path).parents[2].name
+    except IndexError:
+        dataset_prefix = ""
+    return f"{dataset_prefix}_{frame_group}" if dataset_prefix else frame_group
 
 
 def _grouped_train_val_split(
@@ -306,7 +353,7 @@ def _grouped_train_val_split(
 
 _COORD_RE = re.compile(r'^(.+_f\d+)x(\d+)y(\d+)ps(\d+)')
 
-def _parse_patch_coords(filename: str):
+def _parse_patch_coords(filename: str, path: str | None = None):
     """Parse patch coordinates from a filename.
 
     Filename format: ``{group}_x{xxxx}y{yyyy}ps{pp}.tif``
@@ -315,7 +362,7 @@ def _parse_patch_coords(filename: str):
     Returns
     -------
     (group, x_c, y_c, ps) : (str, int, int, int)
-        ``group`` is the source-image key (e.g. ``control_f0001``).
+        ``group`` is the source-image key (e.g. ``vinc_control_f0001``).
         ``x_c``, ``y_c`` are the patch centre coordinates in padded image space.
         ``ps`` is the patch side length in pixels.
     Returns ``None`` if the filename does not match the expected pattern.
@@ -324,7 +371,14 @@ def _parse_patch_coords(filename: str):
     m = _COORD_RE.match(stem)
     if m is None:
         return None
-    return m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))
+    frame_group = m.group(1)
+    if path is not None:
+        try:
+            dataset_prefix = Path(path).parents[2].name
+            frame_group = f"{dataset_prefix}_{frame_group}"
+        except IndexError:
+            pass
+    return frame_group, int(m.group(2)), int(m.group(3)), int(m.group(4))
 
 
 # ---------------------------------------------------------------------------
@@ -332,33 +386,28 @@ def _parse_patch_coords(filename: str):
 # ---------------------------------------------------------------------------
 
 def _patch_hessian_l1(raw: np.ndarray, recon: np.ndarray) -> float:
-    """Mean absolute difference of Hessian maps between raw and recon patches.
+    """Mean Frobenius norm of the Hessian of the residual (raw − recon).
 
-    For each interior pixel (outermost row/col excluded) computes the
-    Frobenius norm of the 2×2 Hessian matrix as a scalar Hessian map,
-    then returns mean(|H_raw - H_recon|) over all interior pixels.
+    Computes second-order finite differences of the residual image at interior
+    pixels, then returns mean(‖H_residual‖_F) over all interior pixels.
+    This directly measures curvature content left in the reconstruction error,
+    independent of the absolute curvature scale of the raw patch.
     For multi-channel (C, H, W) the result is averaged over channels.
     """
     if raw.ndim == 3:  # (C, H, W) — average over channels
         return float(np.mean([_patch_hessian_l1(raw[c], recon[c])
                                for c in range(raw.shape[0])]))
-    # single channel: (H, W)
-    r, p = raw.astype(np.float64), recon.astype(np.float64)
-    # second derivatives at interior pixels via finite differences
-    Ixx_r = r[1:-1, 2:]  + r[1:-1, :-2] - 2 * r[1:-1, 1:-1]
-    Ixx_p = p[1:-1, 2:]  + p[1:-1, :-2] - 2 * p[1:-1, 1:-1]
-    Iyy_r = r[2:, 1:-1]  + r[:-2, 1:-1] - 2 * r[1:-1, 1:-1]
-    Iyy_p = p[2:, 1:-1]  + p[:-2, 1:-1] - 2 * p[1:-1, 1:-1]
-    Ixy_r = (r[2:, 2:] - r[2:, :-2] - r[:-2, 2:] + r[:-2, :-2]) / 4
-    Ixy_p = (p[2:, 2:] - p[2:, :-2] - p[:-2, 2:] + p[:-2, :-2]) / 4
-    # scalar Hessian map = Frobenius norm of [[Ixx, Ixy],[Ixy, Iyy]] per pixel
-    H_raw   = np.sqrt(Ixx_r ** 2 + 2 * Ixy_r ** 2 + Iyy_r ** 2)
-    H_recon = np.sqrt(Ixx_p ** 2 + 2 * Ixy_p ** 2 + Iyy_p ** 2)
-    # per-pixel absolute difference, then mean
-    return float(np.mean(np.abs(H_raw - H_recon)))
+    # single channel: (H, W) — work on residual image
+    d = raw.astype(np.float64) - recon.astype(np.float64)
+    dIxx = d[1:-1, 2:]  + d[1:-1, :-2] - 2 * d[1:-1, 1:-1]
+    dIyy = d[2:,  1:-1] + d[:-2, 1:-1] - 2 * d[1:-1, 1:-1]
+    dIxy = (d[2:, 2:] - d[2:, :-2] - d[:-2, 2:] + d[:-2, :-2]) / 4
+    # Frobenius norm of [[dIxx, dIxy],[dIxy, dIyy]] per interior pixel
+    H_diff = np.sqrt(dIxx ** 2 + 2 * dIxy ** 2 + dIyy ** 2)
+    return float(np.mean(H_diff))
 
 
-def _extract_latents(model, loader, device: str, model_type: str) -> dict:
+def _extract_latents(model, loader, device: str, model_type: str, input_ps: int = 32) -> dict:
     """Run inference over *loader* and collect per-patch latents and reconstructions.
 
     Returns
@@ -383,6 +432,13 @@ def _extract_latents(model, loader, device: str, model_type: str) -> dict:
             ann_labels   = batch[2]             # int tensor (-1 = unlabelled)
             ann_labels_2 = batch[3]             # int tensor, second label or -1
             paths        = batch[4]             # list of str
+
+            # Center-crop enlarged-context patches before model inference
+            if x.shape[-1] != input_ps:
+                h, w = x.shape[-2:]
+                top  = (h - input_ps) // 2
+                left = (w - input_ps) // 2
+                x    = x[:, :, top:top+input_ps, left:left+input_ps]
 
             if model_type == "ae":
                 x_hat, z = model(x)
@@ -612,7 +668,7 @@ def _save_reconstructions(
             stack_recon.append(recon_p)
 
             # parse coordinates for whole-image canvas
-            coords = _parse_patch_coords(fname)
+            coords = _parse_patch_coords(fname, path=path)
             if coords is None:
                 continue  # skip if filename doesn't match pattern
 
@@ -802,6 +858,23 @@ def run_ae_pipeline(cfg: AEConfig):
     def _channel_expand(x: np.ndarray) -> np.ndarray:
         return np.expand_dims(x, 0)
 
+    def _load_hist_map(map_dir: str, patch_path: str):
+        """Auto-detect dataset name from patch path and load its .npz map."""
+        import re as _re
+        m = _re.search(r"/cio_rb/(\w+)/", str(patch_path))
+        if not m:
+            return None
+        ds_name = m.group(1)
+        map_file = Path(map_dir) / f"{ds_name}_map.npz"
+        if not map_file.exists():
+            log.warning("hist_map_dir set but %s not found — skipping for %s",
+                        map_file.name, ds_name)
+            return None
+        data = np.load(str(map_file))
+        hmap = np.stack([data["src_q"], data["ref_q"]])  # (2, N)
+        log.info("  Histogram map loaded: %s", map_file.name)
+        return hmap
+
     datasets = []
     for entry in cfg.patch_dirs:
         condition      = int(entry.get("condition", entry.get("label", 0)))
@@ -818,7 +891,32 @@ def run_ae_pipeline(cfg: AEConfig):
             label_order_2     = cfg.label_order_2,
         )
 
-        if "channel_dirs" in entry:
+        # ── histogram map (optional) ──────────────────────────────────────
+        hist_map = None
+        if cfg.hist_map_dir:
+            hist_map = _load_hist_map(
+                cfg.hist_map_dir,
+                entry.get("path") or (entry.get("channel_dirs") or [""])[0],
+            )
+
+        if "channel_dirs" in entry and cfg.enlarged_crop and "frame_dir" in entry:
+            # Multi-channel enlarged crop: load context from per-channel source frames
+            ch_list = cfg.enlarged_crop_channel  # must be a list, e.g. ["pax", "act"]
+            if isinstance(ch_list, str):
+                ch_list = [ch_list] * len(entry["channel_dirs"])
+            ds = MultiChannelEnlargedCropDataset(
+                patch_dirs=entry["channel_dirs"],
+                frame_dir=entry["frame_dir"],
+                channels=ch_list,
+                condition=condition,
+                condition_name=condition_name,
+                context_size=cfg.enlarged_crop_context_size,
+                patch_size=cfg.input_ps,
+                pad_size=cfg.enlarged_crop_pad_size,
+                input_divisor=cfg.enlarged_crop_input_divisor,
+                **shared_ann_kwargs,
+            )
+        elif "channel_dirs" in entry:
             # Multi-channel: stack patches from each channel dir → (C, H, W)
             ds = MultiChannelPatchDataset(
                 entry["channel_dirs"],
@@ -827,6 +925,34 @@ def run_ae_pipeline(cfg: AEConfig):
                 **shared_ann_kwargs,
                 # no transform: stacking already produces (C, H, W)
             )
+        elif cfg.jitter_crop and "frame_dir" in entry:
+            # On-the-fly jitter + rotation crop from source frame TIFFs
+            ds = JitterCropDataset(
+                patch_dir=entry["path"],
+                frame_dir=entry["frame_dir"],
+                channel=cfg.jitter_crop_channel,
+                condition=condition,
+                condition_name=condition_name,
+                max_shift_px=cfg.jitter_crop_max_shift,
+                max_angle_deg=cfg.jitter_crop_max_angle,
+                patch_size=cfg.input_ps,
+                pad_size=cfg.jitter_crop_pad_size,
+                **shared_ann_kwargs,
+            )
+        elif cfg.enlarged_crop and "frame_dir" in entry:
+            # Enlarged context crop — jitter+rotation applied per-view in training loop
+            ds = EnlargedCropDataset(
+                patch_dir=entry["path"],
+                frame_dir=entry["frame_dir"],
+                channel=cfg.enlarged_crop_channel,
+                condition=condition,
+                condition_name=condition_name,
+                context_size=cfg.enlarged_crop_context_size,
+                patch_size=cfg.input_ps,
+                pad_size=cfg.enlarged_crop_pad_size,
+                input_divisor=cfg.enlarged_crop_input_divisor,
+                **shared_ann_kwargs,
+            )
         else:
             ds = PatchDataset(
                 entry["path"],
@@ -834,6 +960,7 @@ def run_ae_pipeline(cfg: AEConfig):
                 condition_name=condition_name,
                 **shared_ann_kwargs,
                 transform=_channel_expand,
+                hist_map=hist_map,
             )
         path_display = entry.get("path") or entry.get("channel_dirs", "?")
         if cfg.annotation_file and ds.num_classes > 0:
@@ -892,14 +1019,16 @@ def run_ae_pipeline(cfg: AEConfig):
         batch_size=cfg.batch_size,
         shuffle=True,
         drop_last=False,
-        num_workers=0,
+        num_workers=cfg.num_workers,
+        persistent_workers=cfg.num_workers > 0,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=cfg.batch_size,
         shuffle=False,
         drop_last=False,
-        num_workers=0,
+        num_workers=cfg.num_workers,
+        persistent_workers=cfg.num_workers > 0,
     )
 
     # ------------------------------------------------------------------
@@ -940,6 +1069,7 @@ def run_ae_pipeline(cfg: AEConfig):
             no_ch=cfg.no_ch,
             noise_prob=cfg.noise_prob,
             BN_flag=cfg.BN_flag,
+            output_sigmoid=cfg.output_sigmoid,
         )
 
     model = model.to(cfg.device)
@@ -968,6 +1098,9 @@ def run_ae_pipeline(cfg: AEConfig):
             loss_norm_flag=cfg.loss_norm_flag,
             result_dir=result_dir_str,
             weight_decay=cfg.weight_decay,
+            enlarged_crop_max_shift=cfg.enlarged_crop_max_shift if cfg.enlarged_crop else 0,
+            enlarged_crop_max_angle=cfg.enlarged_crop_max_angle if cfg.enlarged_crop else 0.0,
+            patch_size=cfg.input_ps,
             **_sched_kwargs,
         )
 
@@ -1013,6 +1146,15 @@ def run_ae_pipeline(cfg: AEConfig):
             noise_prob=cfg.noise_prob,
             temperature=cfg.temperature,
             use_flip=cfg.use_flip,
+            weight_decay=cfg.weight_decay,
+            warmup_epochs=cfg.warmup_epochs,
+            min_epochs_for_best=cfg.min_epochs_for_best,
+            lr_scheduler=cfg.lr_scheduler,
+            patch_size=cfg.input_ps,
+            enlarged_crop_max_shift=cfg.enlarged_crop_max_shift if cfg.enlarged_crop else 0,
+            enlarged_crop_max_angle=cfg.enlarged_crop_max_angle if cfg.enlarged_crop else 0.0,
+            recon_loss_type=cfg.recon_loss_type,
+            lambda_hessian=cfg.lambda_hessian,
         )
 
     else:  # "supcon"
@@ -1027,6 +1169,16 @@ def run_ae_pipeline(cfg: AEConfig):
             noise_prob=cfg.noise_prob,
             temperature=cfg.temperature,
             use_flip=cfg.use_flip,
+            weight_decay=cfg.weight_decay,
+            warmup_epochs=cfg.warmup_epochs,
+            min_epochs_for_best=cfg.min_epochs_for_best,
+            lr_scheduler=cfg.lr_scheduler,
+            lr_min=cfg.lr_min,
+            patch_size=cfg.input_ps,
+            enlarged_crop_max_shift=cfg.enlarged_crop_max_shift if cfg.enlarged_crop else 0,
+            enlarged_crop_max_angle=cfg.enlarged_crop_max_angle if cfg.enlarged_crop else 0.0,
+            recon_loss_type=cfg.recon_loss_type,
+            lambda_hessian=cfg.lambda_hessian,
         )
 
     # ------------------------------------------------------------------
@@ -1047,8 +1199,8 @@ def run_ae_pipeline(cfg: AEConfig):
     val_loader_ordered = DataLoader(
         val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0
     )
-    train_result = _extract_latents(model, train_loader_ordered, cfg.device, cfg.model_type)
-    val_result   = _extract_latents(model, val_loader_ordered,   cfg.device, cfg.model_type)
+    train_result = _extract_latents(model, train_loader_ordered, cfg.device, cfg.model_type, input_ps=cfg.input_ps)
+    val_result   = _extract_latents(model, val_loader_ordered,   cfg.device, cfg.model_type, input_ps=cfg.input_ps)
 
     csv_path = _save_latent_csv(
         train_result, val_result,

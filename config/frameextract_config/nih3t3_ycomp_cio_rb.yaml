@@ -1,0 +1,47 @@
+# Dataset   : nih3t3
+# Condition : ycomp
+# Norm      : CIO-RB  (rolling ball radius 20 + cell_insideoutside)
+# ch0=vinculin (same layout as vinc), ch1=paxillin, ch2=zyxin, ch3=actin
+root_folder : "/net/projects/CLS/lding/data/fa_data_analysis"
+
+paths:
+  image_folder     : root_folder + "/fa_data/other_paxillin/20260227_NIH3T3_ZyxinGFP,Phalloidin405,Vinc_rb647,Pax_m555_reduced_size_AH/YCompound"
+  cell_mask_folder : null
+  output_dir       : root_folder + "/ae_results/source_frames/cio_rb/nih3t3/ycomp"
+
+experiment:
+  condition : "ycomp"
+
+input:
+  file_type : "czi"
+  start_ind : 0
+  end_ind   : 999
+
+channels:
+  - index : 0
+    name  : "vinc"
+    scale : 5.0
+  - index : 1
+    name  : "pax"
+    scale : 8.0
+  - index : 2
+    name  : "zyx"
+    scale : 5.0
+  - index : 3
+    name  : "act"
+    scale : 5.0
+
+preprocessing:
+  rolling_ball_radius : 20
+
+segmentation:
+  seg_ch                  : 1
+  seg_threshold           : 0.1
+  seg_close_size          : 11
+  seg_min_size_initial    : 3
+  seg_min_size_post_close : 10
+  seg_min_size_final      : 30000
+
+misc:
+  debug     : false
+  log_level : "INFO"

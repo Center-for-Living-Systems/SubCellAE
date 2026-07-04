@@ -3,11 +3,11 @@
 # Norm      : cell_insideoutside  (rolling ball radius 20)
 # Seg       : on-the-fly (default); see commented cell_mask_folder for pre-computed option
 paths:
-  root_folder      : "/home/lding/lding/fa_data_analysis"
+  root_folder      : "/net/projects/CLS/lding/data/fa_data_analysis"
   image_folder     : root_folder + "/fa_data/other_paxillin/20250720_eGFP-Zyxin 488, Phalloidin 405, pFAK (rb) 647, paxillin(m)568/072025/Ycomp"
   cell_mask_folder : null   # on-the-fly segmentation (default)
-  patch_output_dir : root_folder + "/ae_results/patches/cio_rb/pfak/ycomp/tiff_patches32"
-  plot_output_dir  : root_folder + "/ae_results/patches/cio_rb/pfak/ycomp/plot_patches32"
+  patch_output_dir : root_folder + "/ae_results/patches/cio_rb/pfak/ycomp/tiff_patches32_mr10"
+  plot_output_dir  : root_folder + "/ae_results/patches/cio_rb/pfak/ycomp/plot_patches32_mr10"
 
 experiment:
   condition : "ycomp"
@@ -20,7 +20,7 @@ input:
 
 patch:
   patch_size   : 32
-  mask_ratio   : 0.4
+  mask_ratio   : 0.1
   pad_size     : 64
   patch_prefix : "ycomp"
 

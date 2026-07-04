@@ -409,7 +409,7 @@ def _plot_umap_predicted(
         Fixed axis limits.  Pass the bounds computed from the full embedding
         so that all subset plots share the same coordinate system.
     """
-    palette = plt.get_cmap("tab10")
+    tab10 = plt.cm.tab10.colors
     pred_arr = np.array(pred_names)
     fig, ax = plt.subplots(figsize=(8, 7))
     for i, lbl in enumerate(label_order):
@@ -419,7 +419,7 @@ def _plot_umap_predicted(
         if label_to_color and lbl in label_to_color:
             color = label_to_color[lbl]
         else:
-            color = palette(i / max(len(label_order) - 1, 1))
+            color = tab10[i % 10]
         ax.scatter(
             emb[mask, 0], emb[mask, 1],
             label=lbl, s=4, alpha=0.6, color=color,
@@ -455,7 +455,7 @@ def _plot_umap_split(
     This diagnostic reveals whether the class cluster structure seen for
     training patches also holds for held-out validation patches.
     """
-    palette = plt.get_cmap("tab10")
+    tab10 = plt.cm.tab10.colors
     split_arr = np.array(split_labels)
     pred_arr  = np.array(pred_names)
 
@@ -466,7 +466,7 @@ def _plot_umap_split(
 
     fig, ax = plt.subplots(figsize=(8, 7))
     for i, lbl in enumerate(label_order):
-        color = palette(i / max(len(label_order) - 1, 1))
+        color = tab10[i % 10]
         for sp, (marker, alpha, size, sp_label) in split_styles.items():
             mask = (pred_arr == lbl) & (split_arr == sp)
             if not mask.any():

@@ -1,0 +1,55 @@
+# =============================================================================
+# AE variant: baseline (standard AE, no supervision)
+# Training data: vinc + ppax (control + ycomp each)
+# Purpose: generalizability test — does adding ppax training data improve
+#          reconstruction of unseen datasets (pfak, nih3t3)?
+# Results: ae_results/generalizability/baseline_vinc_ppax/
+# =============================================================================
+root_folder : "/net/projects/CLS/lding/data/fa_data_analysis"
+
+data:
+  patch_dirs:
+    - path           : root_folder + "/ae_results/pax_ch_patch/cio_rb/vinc/control/tiff_patches32"
+      condition      : 0
+      condition_name : "vinc_control"
+    - path           : root_folder + "/ae_results/pax_ch_patch/cio_rb/vinc/ycomp/tiff_patches32"
+      condition      : 1
+      condition_name : "vinc_ycomp"
+    - path           : root_folder + "/ae_results/pax_ch_patch/cio_rb/ppax/control/tiff_patches32"
+      condition      : 2
+      condition_name : "ppax_control"
+    - path           : root_folder + "/ae_results/pax_ch_patch/cio_rb/ppax/ycomp/tiff_patches32"
+      condition      : 3
+      condition_name : "ppax_ycomp"
+
+output:
+  result_dir : root_folder + "/ae_results/generalizability/baseline_vinc_ppax"
+
+model:
+  model_type   : "ae"
+  latent_dim   : 8
+  input_ps     : 32
+  no_ch        : 1
+  BN_flag      : false
+  dropout_flag : false
+
+training:
+  epochs                : 500
+  lr                    : 0.001
+  batch_size            : 128
+  val_split             : 0.2
+  loss_norm_flag        : false
+  group_split           : true
+  weight_decay          : 0.0001
+  lr_scheduler          : "cosine"
+  lr_min                : 1e-5
+  min_epochs_for_best   : 200
+
+reconstruction:
+  save_recon      : true
+  recon_pad_size  : 64
+  recon_image_size: 1024
+
+misc:
+  device    : "auto"
+  log_level : "INFO"

@@ -7,9 +7,9 @@
 #   0322  — 200 ep, no weight decay, no warmup, no LR scheduler
 #   0324  — 500 ep, weight_decay=1e-4, no warmup, no scheduler
 #   mar30 — 500 ep, weight_decay=1e-4, warmup 200 ep, no scheduler
-#   final — 500 ep, weight_decay=1e-4, warmup 200 ep, cosine LR → 1e-5
+#   apr08 — 500 ep, weight_decay=1e-4, warmup 200 ep, cosine LR → 1e-5
 #
-# Results tree:  ae_results/strategy_sweep/strategy_{0322,0324,mar30,final}/semisup_both/
+# Results tree:  ae_results/strategy_sweep/strategy_{0322,0324,mar30,apr08}/semisup_both/
 #   latents.csv
 #   fa_cls_lat8/          pos_cls_lat8/
 #   fa_cls_lat8dist8/     pos_cls_lat8dist8/
@@ -37,15 +37,15 @@ python scripts/run_ae_from_config.py $AE_CFG/strategy_0324.yaml
 echo "--- [3/4] strategy_mar30 ---"
 python scripts/run_ae_from_config.py $AE_CFG/strategy_mar30.yaml
 
-echo "--- [4/4] strategy_final ---"
-python scripts/run_ae_from_config.py $AE_CFG/strategy_final.yaml
+echo "--- [4/4] strategy_apr08 ---"
+python scripts/run_ae_from_config.py $AE_CFG/strategy_apr08.yaml
 
 echo ""
 echo "======================================================================"
 echo " STAGE 2 — Classification  (16 runs: 4 strategies × 2 targets × 2 features)"
 echo "======================================================================"
 
-for strategy in 0322 0324 mar30 final; do
+for strategy in 0322 0324 mar30 apr08; do
   echo "--- ${strategy} | FA type  | lat8 ---"
   python scripts/run_classification_from_config.py $CLS_CFG/cls_${strategy}_fa_lat8.yaml
 
@@ -64,7 +64,7 @@ echo "======================================================================"
 echo " STAGE 3 — Visualization  (8 runs: 4 strategies × 2 feature sets)"
 echo "======================================================================"
 
-for strategy in 0322 0324 mar30 final; do
+for strategy in 0322 0324 mar30 apr08; do
   echo "--- vis ${strategy} | lat8 ---"
   python scripts/run_cross_classification_vis.py $CLS_CFG/vis_${strategy}_lat8.yaml
 

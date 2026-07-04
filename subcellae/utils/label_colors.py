@@ -70,3 +70,17 @@ position_label_to_id = {
     cls: i
     for i, cls in enumerate(position_label_order)
 }
+
+# ---------------------------------------------------------------------------
+# Condition and split colours
+# ---------------------------------------------------------------------------
+
+condition_label_to_color = {
+    "control": TAB10_COLORS[3],  # red
+    "ycomp":   TAB10_COLORS[2],  # green
+}
+
+split_label_to_color = {
+    "train": TAB10_COLORS[0],  # blue
+    "val":   TAB10_COLORS[1],  # orange
+}

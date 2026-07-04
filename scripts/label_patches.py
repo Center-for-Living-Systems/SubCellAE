@@ -276,7 +276,8 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
             return
         annotator = name_input.value.strip().replace(' ', '_') or 'unknown'
         stamp = datetime.now().strftime('%Y%m%d_%H%M')
-        out = Path(h5_path).parent / f'labels_{annotator}_{stamp}.csv'
+        h5_stem = Path(h5_path).stem
+        out = Path(h5_path).parent / f'{h5_stem}_{annotator}_{stamp}.csv'
         out.parent.mkdir(parents=True, exist_ok=True)
         rows = [{'filename': fn, 'label': lbl, 'annotator': annotator}
                 for fn, lbl in labels.items()]
@@ -287,6 +288,42 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
         )
 
     finish_btn.on_click(_on_finish)
+
+    # ── Load previous CSV ─────────────────────────────────────────────────────
+    load_path_input = pn.widgets.TextInput(
+        placeholder='Path to previous labels CSV to resume…',
+        width=480,
+    )
+    load_btn = pn.widgets.Button(name='Load CSV', button_type='primary', width=100)
+
+    def _on_load(event) -> None:
+        csv_path = load_path_input.value.strip()
+        if not csv_path:
+            status_md.object = '<i style="color:#e55;">Enter a CSV path first.</i>'
+            return
+        p = Path(csv_path)
+        if not p.exists():
+            status_md.object = f'<i style="color:#e55;">File not found: {csv_path}</i>'
+            return
+        try:
+            loaded = pd.read_csv(str(p))
+            if 'filename' not in loaded.columns or 'label' not in loaded.columns:
+                status_md.object = '<i style="color:#e55;">CSV must have "filename" and "label" columns.</i>'
+                return
+            for _, row in loaded.iterrows():
+                if pd.notna(row['label']) and str(row['label']).strip():
+                    labels[str(row['filename'])] = str(row['label'])
+            rects_src.data = _rects_for_group(_state['group'], _state['H'])
+            _update_count()
+            status_md.object = (
+                f'<span style="color:#3c3;font-size:13px;font-weight:bold;">'
+                f'✓ Loaded {len(loaded)} rows from {p.name} '
+                f'({len(labels)} labeled patches active)</span>'
+            )
+        except Exception as exc:
+            status_md.object = f'<i style="color:#e55;">Error loading CSV: {exc}</i>'
+
+    load_btn.on_click(_on_load)
 
     # ── Layout ────────────────────────────────────────────────────────────────
     toolbar = pn.Row(
@@ -310,6 +347,12 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
             name_input,
             pn.Spacer(width=20),
             img_selector,
+        ),
+        pn.Row(
+            pn.pane.HTML('<b style="line-height:2.2;">Resume:</b>', width=80),
+            load_path_input,
+            pn.Spacer(width=10),
+            load_btn,
         ),
         toolbar,
         status_md,

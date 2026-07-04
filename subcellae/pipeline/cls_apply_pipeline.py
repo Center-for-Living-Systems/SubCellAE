@@ -135,8 +135,8 @@ def _plot_umap(emb: np.ndarray, labels, palette_name: str,
                title: str, save_path: Path, label_order=None) -> None:
     """Scatter UMAP coloured by *labels* (str or numeric)."""
     unique = list(label_order) if label_order else sorted(set(str(l) for l in labels))
-    palette = plt.get_cmap("tab10")
-    color_map = {lbl: palette(i % 10) for i, lbl in enumerate(unique)}
+    tab10 = plt.cm.tab10.colors
+    color_map = {lbl: tab10[i % 10] for i, lbl in enumerate(unique)}
 
     fig, ax = plt.subplots(figsize=(8, 6))
     for lbl in unique:

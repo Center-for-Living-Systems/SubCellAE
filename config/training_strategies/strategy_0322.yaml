@@ -48,7 +48,7 @@ training:
   semisup_lr_scheduler_patience : 0     # no ReduceLROnPlateau — fixed LR throughout
 
 annotation:
-  annotation_file : root_folder + "/labelling/paxdata_paxpatch_batch1and2_combined_labels.csv"
+  annotation_file : root_folder + "/labelling/labels_vinc_20260521.csv"
   label_col       : "classification"
   filename_col    : "unique_ID"
   label_order     :
@@ -58,7 +58,7 @@ annotation:
     - "fibrillar adhesion"
     - "No adhesion"
 
-  annotation_file_2 : root_folder + "/labelling/paxdata_paxpatch_batch1and2_combined_labels.csv"
+  annotation_file_2 : root_folder + "/labelling/labels_vinc_20260521.csv"
   label_col_2       : "Position"
   filename_col_2    : "unique_ID"
   label_order_2     :

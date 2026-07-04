@@ -1,0 +1,50 @@
+# =============================================================================
+# AE variant: baseline (standard AE, no contrastive)
+# Dataset: vinc ch3 (actin) — control + ycomp
+# latent_dim=12  (matches contrastive ch3 models for fair comparison)
+# Results: ae_results/contrastive_run/baseline_vinc_only_ch3/
+# =============================================================================
+root_folder : "/net/projects/CLS/lding/data/fa_data_analysis"
+
+data:
+  patch_dirs:
+    - path           : root_folder + "/ae_results/patches/cio_rb/vinc_ch3/control/tiff_patches32_mr10"
+      condition      : 0
+      condition_name : "control"
+    - path           : root_folder + "/ae_results/patches/cio_rb/vinc_ch3/ycomp/tiff_patches32_mr10"
+      condition      : 1
+      condition_name : "ycomp"
+
+output:
+  result_dir : root_folder + "/ae_results/contrastive_run/baseline_vinc_only_ch3"
+
+model:
+  model_type      : "ae"
+  latent_dim      : 12
+  input_ps        : 32
+  no_ch           : 1
+  BN_flag         : false
+  dropout_flag    : false
+  output_sigmoid  : true
+
+training:
+  epochs                  : 500
+  lr                      : 0.001
+  batch_size              : 128
+  num_workers             : 6
+  val_split               : 0.2
+  loss_norm_flag          : false
+  group_split             : true
+  weight_decay            : 0.0001
+  lr_scheduler            : "cosine"
+  early_stopping_patience : 0
+  min_epochs_for_best     : 0
+
+reconstruction:
+  save_recon      : true
+  recon_pad_size  : 64
+  recon_image_size: 1024
+
+misc:
+  device    : "auto"
+  log_level : "INFO"

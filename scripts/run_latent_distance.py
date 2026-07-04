@@ -339,6 +339,9 @@ def run_one(variant_dir: Path, metric: str, sample_pairs: int | None,
          f"{variant_dir.name} — condition (control vs ycomp)")
 
     # ── FA type (lat8 only) ───────────────────────────────────────────────
+    _FA_EXCLUDE      = ("Uncertain", "No adhesion")
+    _FA_2CLASS_KEEP  = ("Nascent Adhesion", "focal adhesion")
+
     fa_merged_for_combo = None
     for feat_set, fa_df in _load_cls_labels_all(variant_dir, "fa"):
         if "dist" in feat_set:
@@ -347,11 +350,19 @@ def run_one(variant_dir: Path, metric: str, sample_pairs: int | None,
             fa_df.rename(columns={"classification": "fa_cls"}),
             on="filename", how="inner")
         print(f"  [debug] fa merge rows: {len(merged)}")
+        # All FA types excluding Uncertain + No adhesion
         _try("fa_type", X[merged["_idx"].values],
              merged["fa_cls"].values,
              str(variant_dir / "latent_dist_fa_type.png"),
-             f"{variant_dir.name} — FA type (lat dims only)",
-             exclude=("Uncertain",))
+             f"{variant_dir.name} — FA type (excl. No adhesion)",
+             exclude=_FA_EXCLUDE)
+        # 2-class: Nascent Adhesion vs focal adhesion only
+        mask_2cls = merged["fa_cls"].isin(_FA_2CLASS_KEEP).values
+        if mask_2cls.sum() >= 4:
+            _try("fa_type_2class", X[merged["_idx"].values[mask_2cls]],
+                 merged["fa_cls"].values[mask_2cls],
+                 str(variant_dir / "latent_dist_fa_type_2class.png"),
+                 f"{variant_dir.name} — FA type (Nascent vs Focal only)")
         fa_merged_for_combo = merged
         break
 
@@ -415,12 +426,20 @@ def run_one(variant_dir: Path, metric: str, sample_pairs: int | None,
 
     if has_fa_ann and fa_merged_for_combo is None:
         mask_fa = (ann_df["annotation_label"].fillna(-1) != -1).values
+        fa_ann_labels = ann_df.loc[mask_fa, "annotation_label_name"].values
         _try("fa_type",
              X[mask_fa],
-             ann_df.loc[mask_fa, "annotation_label_name"].values,
+             fa_ann_labels,
              str(variant_dir / "latent_dist_fa_type.png"),
-             f"{variant_dir.name} — FA type (annotation)",
-             exclude=("Uncertain",))
+             f"{variant_dir.name} — FA type (excl. No adhesion)",
+             exclude=_FA_EXCLUDE)
+        mask_2cls = np.isin(fa_ann_labels, _FA_2CLASS_KEEP)
+        if mask_2cls.sum() >= 4:
+            _try("fa_type_2class",
+                 X[mask_fa][mask_2cls],
+                 fa_ann_labels[mask_2cls],
+                 str(variant_dir / "latent_dist_fa_type_2class.png"),
+                 f"{variant_dir.name} — FA type (Nascent vs Focal only)")
 
     if has_pos_ann and pos_merged_for_combo is None:
         mask_pos = (ann_df["annotation_label_2"].fillna(-1) != -1).values

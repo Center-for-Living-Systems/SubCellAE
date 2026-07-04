@@ -39,28 +39,16 @@ import tifffile
 # ── Hessian helper ────────────────────────────────────────────────────────────
 
 def _patch_hessian_l1(raw: np.ndarray, recon: np.ndarray) -> float:
-    """Mean absolute difference of Hessian maps between raw and recon patches.
-
-    For each interior pixel computes the Frobenius norm of the 2×2 Hessian
-    matrix as a scalar map, then returns mean(|H_raw - H_recon|).
-    For multi-channel (C,H,W) averages over channels.
-    """
+    """Mean Frobenius norm of the Hessian of the residual (raw − recon)."""
     if raw.ndim == 3:
         return float(np.mean([_patch_hessian_l1(raw[c], recon[c])
                                for c in range(raw.shape[0])]))
-    r = raw.astype(np.float64)
-    p = recon.astype(np.float64)
-    Ixx_r = r[1:-1, 2:]  + r[1:-1, :-2] - 2 * r[1:-1, 1:-1]
-    Ixx_p = p[1:-1, 2:]  + p[1:-1, :-2] - 2 * p[1:-1, 1:-1]
-    Iyy_r = r[2:,  1:-1] + r[:-2, 1:-1] - 2 * r[1:-1, 1:-1]
-    Iyy_p = p[2:,  1:-1] + p[:-2, 1:-1] - 2 * p[1:-1, 1:-1]
-    Ixy_r = (r[2:, 2:] - r[2:, :-2] - r[:-2, 2:] + r[:-2, :-2]) / 4
-    Ixy_p = (p[2:, 2:] - p[2:, :-2] - p[:-2, 2:] + p[:-2, :-2]) / 4
-    # scalar Hessian map = Frobenius norm of [[Ixx,Ixy],[Ixy,Iyy]] per pixel
-    H_raw   = np.sqrt(Ixx_r ** 2 + 2 * Ixy_r ** 2 + Iyy_r ** 2)
-    H_recon = np.sqrt(Ixx_p ** 2 + 2 * Ixy_p ** 2 + Iyy_p ** 2)
-    # per-pixel absolute difference, then mean
-    return float(np.mean(np.abs(H_raw - H_recon)))
+    d = raw.astype(np.float64) - recon.astype(np.float64)
+    dIxx = d[1:-1, 2:]  + d[1:-1, :-2] - 2 * d[1:-1, 1:-1]
+    dIyy = d[2:,  1:-1] + d[:-2, 1:-1] - 2 * d[1:-1, 1:-1]
+    dIxy = (d[2:, 2:] - d[2:, :-2] - d[:-2, 2:] + d[:-2, :-2]) / 4
+    H_diff = np.sqrt(dIxx ** 2 + 2 * dIxy ** 2 + dIyy ** 2)
+    return float(np.mean(H_diff))
 
 
 # ── Plotting helpers ──────────────────────────────────────────────────────────

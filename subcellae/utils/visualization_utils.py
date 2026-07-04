@@ -78,7 +78,7 @@ def cluster_3Dplot(latents, ind1,ind2,ind3, labels):
 
 def umap_2Dplot(latents, ind1,ind2,labels):
     fig = plt.figure(figsize=(8, 6))
-    plt.scatter(latents[:, ind1], latents[:, ind2], c=labels+1, cmap='tab20', alpha=0.7, s=1, vmin=0, vmax=10)
+    plt.scatter(latents[:, ind1], latents[:, ind2], c=labels+1, cmap='tab10', alpha=0.7, s=1, vmin=0, vmax=10)
     plt.xlabel("UMAP1")
     plt.ylabel("UMAP2")
     plt.title("UMAP")    

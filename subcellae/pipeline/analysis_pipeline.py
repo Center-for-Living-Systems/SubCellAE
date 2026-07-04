@@ -39,6 +39,20 @@ log = logging.getLogger(__name__)
 
 _VALID_SPLITS = {"all", "train", "val"}
 
+from subcellae.utils.label_colors import (
+    classification_label_to_color as FA_COLORS,
+    position_label_to_color,
+    condition_label_to_color as CONDITION_COLORS,
+    split_label_to_color     as SPLIT_COLORS,
+)
+
+_COL_COLORS = {
+    "annotation_label_name":   FA_COLORS,
+    "annotation_label_2_name": position_label_to_color,
+    "condition_name":          CONDITION_COLORS,
+    "split":                   SPLIT_COLORS,
+}
+
 
 # ---------------------------------------------------------------------------
 # Configuration dataclass
@@ -133,14 +147,18 @@ def _categorical_scatter(
     xlabel: str,
     ylabel: str,
     cmap: str = "tab10",
+    explicit_colors: dict = None,
 ):
     """Scatter plot coloured by a categorical column."""
-    palette = plt.get_cmap(cmap)
+    tab10 = plt.cm.tab10.colors  # 10 discrete (R,G,B) tuples
     for i, cat in enumerate(order):
         mask = np.array(labels) == cat
+        if explicit_colors and cat in explicit_colors:
+            color = explicit_colors[cat]
+        else:
+            color = tab10[i % 10]
         ax.scatter(x[mask], y[mask],
-                   label=str(cat), s=4, alpha=0.6,
-                   color=palette(i / max(len(order) - 1, 1)))
+                   label=str(cat), s=4, alpha=0.6, color=color)
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -166,6 +184,7 @@ def _save_scatter(
         title=title,
         xlabel=f"{method} 1",
         ylabel=f"{method} 2",
+        explicit_colors=_COL_COLORS.get(col),
     )
     fig.tight_layout()
     fig.savefig(str(save_path), dpi=150)
@@ -770,7 +789,7 @@ def run_analysis_pipeline(cfg: AnalysisConfig):
         _distribution_plot(
             df["recon_hessian_l1"].values,
             title="Hessian L1 – all patches",
-            xlabel="Hessian L1  (|ΔIxx| + |ΔIyy| + 2|ΔIxy|, interior pixels)",
+            xlabel="Hessian L1  (mean ‖H_residual‖_F, interior pixels)",
             save_path=cfg.out_dir / "hessian_l1_distribution.png",
         )
         _metric_by_group_and_split(

@@ -46,15 +46,21 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEAppl
     model_pt = Path(str(_get("model", "model_pt", "")))
 
     # ---- data ----
-    patch_dirs = _get("data", "patch_dirs", [])
-    patch_dirs = [
-        {
-            "path":           str(entry["path"]),
-            "condition":      int(entry.get("condition", entry.get("label", 0))),
-            "condition_name": str(entry.get("condition_name", "")),
-        }
-        for entry in patch_dirs
-    ]
+    raw_patch_dirs = _get("data", "patch_dirs", [])
+    patch_dirs = []
+    for entry in raw_patch_dirs:
+        if "channel_dirs" in entry:
+            patch_dirs.append({
+                "channel_dirs":   [str(d) for d in entry["channel_dirs"]],
+                "condition":      int(entry.get("condition", 0)),
+                "condition_name": str(entry.get("condition_name", "")),
+            })
+        else:
+            patch_dirs.append({
+                "path":           str(entry["path"]),
+                "condition":      int(entry.get("condition", entry.get("label", 0))),
+                "condition_name": str(entry.get("condition_name", "")),
+            })
 
     # ---- output ----
     out_dir = Path(str(_get("output", "out_dir", "results/ae_apply")))
