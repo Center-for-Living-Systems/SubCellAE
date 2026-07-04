@@ -173,7 +173,10 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
     sel_src = ColumnDataSource(dict(x=[], y=[], width=[], height=[]))
 
     # ── Per-channel patch display ─────────────────────────────────────────────
-    _n_ch = patches_allch.shape[1] if patches_allch is not None else 0
+    _n_canvas_ch = (next(iter(images_allch.values())).shape[0]
+                    if images_allch else 0)
+    _n_ch = (patches_allch.shape[1] if patches_allch is not None
+             else _n_canvas_ch)   # fall back to channel count from full-canvas images
     _ps   = patches_allch.shape[2] if patches_allch is not None else 32
     _blank = np.zeros((_ps, _ps), dtype=np.float32)
 
@@ -225,8 +228,6 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
     )
 
     # ── Full-canvas channel views (read-only, linked ranges) ─────────────────
-    _n_canvas_ch = (next(iter(images_allch.values())).shape[0]
-                    if images_allch else 0)
     ch_canvas_srcs: list = []
     ch_canvas_figs: list = []
     _blank_canvas = np.zeros((H, W), dtype=np.float32)
@@ -297,6 +298,8 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
             for _ci, _csrc in enumerate(ch_canvas_srcs):
                 if _ci < ch_arr_allch.shape[0]:
                     _cimg = ch_arr_allch[_ci].astype(np.float32)
+                    _mx = _cimg.max()
+                    _cimg = _cimg / _mx if _mx > 0 else _cimg
                     _csrc.data = dict(
                         image=[np.ascontiguousarray(np.flipud(_cimg))],
                         x=[0], y=[0], dw=[_cimg.shape[1]], dh=[_cimg.shape[0]],
@@ -419,13 +422,34 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
         # Update per-channel patch display
         if patches_allch is not None and near_df < len(patches_allch):
             allch = patches_allch[near_df]   # (C, ps, ps) float32
-            for _ci, (_csrc, _cfig) in enumerate(zip(ch_srcs, ch_figs)):
+            for _ci, _csrc in enumerate(ch_srcs):
                 if _ci < allch.shape[0]:
                     _arr = allch[_ci].astype(np.float32)
                     _csrc.data = dict(
                         image=[np.ascontiguousarray(np.flipud(_arr))],
                         x=[0], y=[0], dw=[_arr.shape[1]], dh=[_arr.shape[0]],
                     )
+        elif ch_srcs and images_allch_norm:
+            # Extract patch region on the fly from full-canvas allch images
+            _grp_key = _norm_fkey(_state['group'])
+            _allch_c = images_allch_norm.get(_grp_key)
+            if _allch_c is not None:
+                _cx   = int(float(row.get('canvas_cx', 0)))
+                _cy   = int(float(row.get('canvas_cy', 0)))
+                _ps_r = int(row.get('ps', _ps))
+                _half = _ps_r // 2
+                _C, _H_c, _W_c = _allch_c.shape
+                _y0 = max(0, _cy - _half); _y1 = min(_H_c, _cy + _half)
+                _x0 = max(0, _cx - _half); _x1 = min(_W_c, _cx + _half)
+                for _ci, _csrc in enumerate(ch_srcs):
+                    if _ci < _C:
+                        _patch = _allch_c[_ci, _y0:_y1, _x0:_x1].astype(np.float32)
+                        _mx = _patch.max()
+                        _patch = _patch / _mx if _mx > 0 else _patch
+                        _csrc.data = dict(
+                            image=[np.ascontiguousarray(np.flipud(_patch))],
+                            x=[0], y=[0], dw=[_patch.shape[1]], dh=[_patch.shape[0]],
+                        )
         _update_count()
 
     canvas_fig.on_event(Tap, _on_tap)
