@@ -1,7 +1,7 @@
 # Dataset   : nih3t3 (20260227 – NIH3T3, Vinc/rb647 + pax/m555)
 # Condition : control
 # Norm      : cell_insideoutside  (rolling ball radius 20)
-# Seg       : on-the-fly; seg_threshold=0.05 (lower than training, for broader cell coverage)
+# Seg       : on-the-fly; seg_threshold=0.08 (lower than training, for broader cell coverage)
 # Labelling : mask_ratio=0.1, separate output dirs — do NOT use for AE training
 paths:
   root_folder      : "/net/projects/CLS/lding/data/fa_data_analysis"
@@ -33,7 +33,7 @@ normalization:
 
 segmentation:
   seg_ch                  : 1
-  seg_threshold           : 0.05
+  seg_threshold           : 0.08
   seg_close_size          : 11
   seg_min_size_initial    : 3
   seg_min_size_post_close : 10
