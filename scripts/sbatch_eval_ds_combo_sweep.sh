@@ -8,13 +8,12 @@
 #SBATCH --output=logs/slurm/ds_combo_eval_%j.out
 
 # Post-training eval + analysis for all 15 dataset-combo models.
-# For each model:
-#   1. Cross-dataset reconstruction eval on all 4 ds (violin plots)
-#   2. UMAP + KMeans cluster panels on z_proj latents
-#
-# Designed to run after sbatch_train_ds_combo_sweep.sh (afterok dependency).
+#   Stage 1: run_cross_dataset_eval.py on the whole ds_combo_enlcrop_sc2/ dir
+#            (sweep mode discovers all 15 models, saves per-model violin plots
+#             + combined cross_dataset_recon_metrics.csv)
+#   Stage 2: UMAP + KMeans cluster panels per model (run_ds_combo_analysis.py)
 
-set -eo pipefail
+set -o pipefail
 exec 2>&1
 
 REPO="$PWD"
@@ -33,22 +32,13 @@ echo "GPU   : $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | 
 echo "Start : $(date)"
 echo "======================================================================"
 
-# ── Stage 1: Cross-dataset eval (violin plots, all 4 ds) ─────────────────────
+# ── Stage 1: Cross-dataset eval (all 15 models in one sweep) ─────────────────
 echo ""
-echo "=== Stage 1: cross-dataset eval ==="
-while IFS= read -r COMBO; do
-    MODEL_DIR="$RUNS/$COMBO"
-    if [ ! -f "$MODEL_DIR/model_final.pt" ] && [ ! -f "$MODEL_DIR/model_best.pt" ]; then
-        echo "  SKIP $COMBO (no checkpoint)"
-        continue
-    fi
-    echo ""
-    echo "--- eval: $COMBO ---"
-    $PYTHON scripts/run_cross_dataset_eval.py "$MODEL_DIR" \
-        --mode sweep --root-folder "$ROOT"
-done < "$COMBO_LIST"
+echo "=== Stage 1: cross-dataset eval (sweep) ==="
+$PYTHON scripts/run_cross_dataset_eval.py "$RUNS" \
+    --mode sweep --root-folder "$ROOT"
 
-# ── Stage 2: UMAP + cluster panels (z_proj) ──────────────────────────────────
+# ── Stage 2: UMAP + cluster panels per model ─────────────────────────────────
 echo ""
 echo "=== Stage 2: UMAP + cluster analysis ==="
 while IFS= read -r COMBO; do
@@ -60,7 +50,7 @@ while IFS= read -r COMBO; do
     fi
     echo ""
     echo "--- analysis: $COMBO ---"
-    $PYTHON scripts/run_ds_combo_analysis.py "$MODEL_DIR"
+    $PYTHON scripts/run_ds_combo_analysis.py "$MODEL_DIR" || echo "  WARNING: analysis failed for $COMBO"
 done < "$COMBO_LIST"
 
 echo ""

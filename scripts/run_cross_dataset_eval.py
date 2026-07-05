@@ -602,7 +602,9 @@ def _run_variant(variant: str, variant_dir: Path, run_dir: Path,
 
     variant_df = pd.concat(variant_rows, ignore_index=True)
     for metric in METRICS:
-        save_path = run_dir / f"{variant}_cross_dataset_{metric}.png"
+        if metric not in variant_df.columns:
+            continue
+        save_path = variant_dir / f"cross_dataset_{metric}.png"
         _violin_plot_single(variant_df, variant, metric, save_path)
     print()
     return variant_df
