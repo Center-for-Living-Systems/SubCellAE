@@ -127,6 +127,8 @@ def run(model_dir: Path, k: int = 10, n_panel: int = 16) -> None:
         print(f"  SKIP: no latents.csv in {model_dir}")
         return
 
+    eval_dir.mkdir(parents=True, exist_ok=True)
+
     df = pd.read_csv(latents_csv)
     print(f"  {len(df)} patches, columns: {list(df.columns[:8])}…")
 
