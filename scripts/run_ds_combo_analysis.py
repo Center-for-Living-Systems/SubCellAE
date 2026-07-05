@@ -33,27 +33,10 @@ from PIL import Image, ImageDraw, ImageFont
 from sklearn.cluster import KMeans
 from umap import UMAP
 
-# ── palette ───────────────────────────────────────────────────────────────────
-
-DS_COLORS = {
-    "vinc":   "#4C72B0",
-    "nih3t3": "#DD8452",
-    "ppax":   "#55A868",
-    "pfak":   "#C44E52",
-}
-COND_MARKER = {"control": "o", "ycomp": "^"}
 SPLIT_COLOR = {"train": "#333333", "val": "#AAAAAA"}
 
-
-def _ds_from_condition(cond_name: str) -> str:
-    for ds in DS_COLORS:
-        if cond_name.startswith(ds):
-            return ds
-    return "vinc"
-
-
-def _cond_suffix(cond_name: str) -> str:
-    return "ycomp" if "ycomp" in cond_name else "control"
+# Max patches per condition used for UMAP fitting — keeps all conditions equally weighted
+UMAP_MAX_PER_COND = 3000
 
 
 # ── cluster panels ────────────────────────────────────────────────────────────
@@ -141,41 +124,62 @@ def run(model_dir: Path, k: int = 10, n_panel: int = 16) -> None:
 
     Z = df[feat_cols].values.astype(np.float32)
 
-    # UMAP
-    print("  Fitting UMAP…")
-    emb = UMAP(n_components=2, random_state=42, n_neighbors=30, min_dist=0.1).fit_transform(Z)
-    np.save(str(eval_dir / "umap_combo_emb.npy"), emb)
-
-    # ── scatter: condition ────────────────────────────────────────────────────
+    # Balanced subsample for UMAP fitting — cap each condition at UMAP_MAX_PER_COND
     cond_col = "condition_name" if "condition_name" in df.columns else None
+    rng = np.random.default_rng(42)
+    if cond_col and df[cond_col].nunique() > 1:
+        sub_idx = []
+        for _, grp in df.groupby(cond_col):
+            idx = grp.index.to_numpy()
+            if len(idx) > UMAP_MAX_PER_COND:
+                idx = rng.choice(idx, UMAP_MAX_PER_COND, replace=False)
+            sub_idx.append(idx)
+        sub_idx = np.concatenate(sub_idx)
+        print(f"  UMAP subsample: {len(sub_idx)} patches "
+              f"(max {UMAP_MAX_PER_COND}/condition)")
+    else:
+        sub_idx = np.arange(len(df))
+
+    Z_sub = Z[sub_idx]
+    df_sub = df.iloc[sub_idx].reset_index(drop=True)
+
+    print("  Fitting UMAP…")
+    reducer = UMAP(n_components=2, random_state=42, n_neighbors=30, min_dist=0.1)
+    emb_sub = reducer.fit_transform(Z_sub)
+    np.save(str(eval_dir / "umap_combo_emb.npy"), emb_sub)
+
+    # ── scatter: condition (tab10 colors, dots only) ──────────────────────────
     fig, ax = plt.subplots(figsize=(7, 6))
     if cond_col:
-        for cond_name, grp in df.groupby(cond_col):
-            ds   = _ds_from_condition(str(cond_name))
-            suf  = _cond_suffix(str(cond_name))
-            color  = DS_COLORS.get(ds, "#888888")
-            marker = COND_MARKER.get(suf, "o")
-            ax.scatter(emb[grp.index, 0], emb[grp.index, 1],
-                       c=color, marker=marker, s=2, alpha=0.4,
-                       linewidths=0, label=cond_name)
-        ax.legend(markerscale=4, fontsize=7, loc="best")
+        cond_names = sorted(df_sub[cond_col].unique())
+        tab10 = plt.get_cmap("tab10")
+        for ci, cond_name in enumerate(cond_names):
+            mask = df_sub[cond_col] == cond_name
+            color = tab10(ci % 10)
+            ax.scatter(emb_sub[mask, 0], emb_sub[mask, 1],
+                       c=[color], s=3, alpha=0.5, linewidths=0,
+                       label=str(cond_name))
+        ax.legend(markerscale=3, fontsize=7, loc="best",
+                  framealpha=0.7, borderpad=0.4)
     else:
-        ax.scatter(emb[:, 0], emb[:, 1], s=2, alpha=0.3)
-    ax.set_title(f"UMAP {feat_label} — condition"); ax.set_xlabel("UMAP 1"); ax.set_ylabel("UMAP 2")
+        ax.scatter(emb_sub[:, 0], emb_sub[:, 1], s=3, alpha=0.3)
+    ax.set_title(f"UMAP {feat_label} — condition")
+    ax.set_xlabel("UMAP 1"); ax.set_ylabel("UMAP 2")
     fig.tight_layout()
     fig.savefig(str(eval_dir / "umap_combo_condition.png"), dpi=150)
     plt.close(fig)
     print("  Saved umap_combo_condition.png")
 
     # ── scatter: train/val split ──────────────────────────────────────────────
-    if "split" in df.columns:
+    if "split" in df_sub.columns:
         fig, ax = plt.subplots(figsize=(7, 6))
-        for spl, grp in df.groupby("split"):
-            ax.scatter(emb[grp.index, 0], emb[grp.index, 1],
-                       c=SPLIT_COLOR.get(str(spl), "#888888"), s=2,
-                       alpha=0.4, linewidths=0, label=str(spl))
-        ax.legend(markerscale=4, fontsize=8)
-        ax.set_title(f"UMAP {feat_label} — split"); ax.set_xlabel("UMAP 1"); ax.set_ylabel("UMAP 2")
+        for spl, grp in df_sub.groupby("split"):
+            ax.scatter(emb_sub[grp.index, 0], emb_sub[grp.index, 1],
+                       c=SPLIT_COLOR.get(str(spl), "#888888"), s=3,
+                       alpha=0.5, linewidths=0, label=str(spl))
+        ax.legend(markerscale=3, fontsize=8)
+        ax.set_title(f"UMAP {feat_label} — split")
+        ax.set_xlabel("UMAP 1"); ax.set_ylabel("UMAP 2")
         fig.tight_layout()
         fig.savefig(str(eval_dir / "umap_combo_split.png"), dpi=150)
         plt.close(fig)
@@ -183,28 +187,27 @@ def run(model_dir: Path, k: int = 10, n_panel: int = 16) -> None:
 
     # ── KMeans + cluster panels ───────────────────────────────────────────────
     print(f"  KMeans k={k}…")
-    km_labels = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(Z)
+    km_labels = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(Z_sub)
 
     patch_paths: list[Path] = []
-    if "patch_path" in df.columns:
-        patch_paths = [Path(p) for p in df["patch_path"]]
-    elif "filepath" in df.columns:
-        patch_paths = [Path(p) for p in df["filepath"]]
-    elif "filename" in df.columns and "patch_dir" in df.columns:
-        patch_paths = [Path(str(d)) / str(f) for d, f in zip(df["patch_dir"], df["filename"])]
+    if "patch_path" in df_sub.columns:
+        patch_paths = [Path(p) for p in df_sub["patch_path"]]
+    elif "filepath" in df_sub.columns:
+        patch_paths = [Path(p) for p in df_sub["filepath"]]
+    elif "filename" in df_sub.columns and "patch_dir" in df_sub.columns:
+        patch_paths = [Path(str(d)) / str(f)
+                       for d, f in zip(df_sub["patch_dir"], df_sub["filename"])]
 
     panels_dir = eval_dir / "cluster_panels_combo"
     if patch_paths:
-        _make_cluster_panels(km_labels, patch_paths, panels_dir, k, n_panel, emb)
+        _make_cluster_panels(km_labels, patch_paths, panels_dir, k, n_panel, emb_sub)
         print(f"  Cluster panels → {panels_dir}/")
     else:
         print("  WARNING: no patch paths in latents.csv — skipping cluster panels")
         panels_dir.mkdir(parents=True, exist_ok=True)
-        # still save the kmeans scatter
-        _make_cluster_panels.__globals__  # no-op, just save scatter
         fig, ax = plt.subplots(figsize=(7, 6))
-        ax.scatter(emb[:, 0], emb[:, 1], c=km_labels,
-                   cmap="tab20", s=2, alpha=0.4, linewidths=0)
+        ax.scatter(emb_sub[:, 0], emb_sub[:, 1], c=km_labels,
+                   cmap="tab20", s=3, alpha=0.4, linewidths=0)
         ax.set_title(f"KMeans k={k}")
         fig.tight_layout()
         fig.savefig(str(panels_dir / f"umap_combo_kmeans_k{k}.png"), dpi=150)

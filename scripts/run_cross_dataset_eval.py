@@ -212,40 +212,8 @@ def _training_recon_metrics(variant_dir: Path) -> pd.DataFrame | None:
     # Extract true dataset name from condition_name (e.g. "ppax_control" → "ppax")
     df["dataset"] = df["condition_name"].apply(_dataset_from_condition)
 
-    # Try to merge FA annotation for vinc rows only
-    lat_csv = variant_dir / "latents.csv"
-    fa_map: dict[str, str] = {}
-    if lat_csv.exists():
-        try:
-            lat_df = pd.read_csv(lat_csv, usecols=["filename", "annotation_label_name"])
-            if "annotation_label_name" in lat_df.columns:
-                lat_df["_stem"] = lat_df["filename"].apply(lambda p: Path(p).stem)
-                valid = lat_df[lat_df["annotation_label_name"].notna()
-                               & (lat_df["annotation_label_name"] != "-1")]
-                fa_map = valid.drop_duplicates("_stem").set_index(
-                    "_stem")["annotation_label_name"].to_dict()
-        except Exception:
-            pass
-
-    if fa_map and "name" in df.columns:
-        df["_stem"] = df["name"].apply(lambda p: Path(p).stem)
-        df["fa_type"] = df["_stem"].map(fa_map)
-    else:
-        df["fa_type"] = None
-
-    def _make_group(row) -> str:
-        ds    = row["dataset"]
-        split = row.get("split", "train")
-        cond  = row["condition_name"]
-        fa    = row.get("fa_type")
-        if ds == "vinc" and pd.notna(fa) and fa != "-1":
-            return f"vinc_{split}_{fa}"
-        elif ds == "vinc":
-            return f"vinc_{split}_unlabeled"
-        else:
-            return f"{cond}_{split}"   # e.g. "ppax_control_train"
-
-    df["group"] = df.apply(_make_group, axis=1)
+    # Group by condition_name + split, consistent across all datasets
+    df["group"] = df["condition_name"] + "_" + df["split"]  # e.g. "vinc_control_train"
     return df
 
 
