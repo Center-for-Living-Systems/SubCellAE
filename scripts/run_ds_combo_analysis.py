@@ -121,9 +121,10 @@ def _make_cluster_panels(labels: np.ndarray, patch_paths: list[Path],
 
 def run(model_dir: Path, k: int = 10, n_panel: int = 16) -> None:
     eval_dir   = model_dir / "eval"
-    latents_csv = eval_dir / "latents.csv"
+    # latents.csv lives at the model root (written by run_ae_from_config.py)
+    latents_csv = model_dir / "latents.csv"
     if not latents_csv.exists():
-        print(f"  SKIP: no latents.csv in {eval_dir}")
+        print(f"  SKIP: no latents.csv in {model_dir}")
         return
 
     df = pd.read_csv(latents_csv)
@@ -185,6 +186,8 @@ def run(model_dir: Path, k: int = 10, n_panel: int = 16) -> None:
     patch_paths: list[Path] = []
     if "patch_path" in df.columns:
         patch_paths = [Path(p) for p in df["patch_path"]]
+    elif "filepath" in df.columns:
+        patch_paths = [Path(p) for p in df["filepath"]]
     elif "filename" in df.columns and "patch_dir" in df.columns:
         patch_paths = [Path(str(d)) / str(f) for d, f in zip(df["patch_dir"], df["filename"])]
 

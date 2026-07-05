@@ -43,7 +43,7 @@ echo ""
 echo "=== Stage 2: UMAP + cluster analysis ==="
 while IFS= read -r COMBO; do
     MODEL_DIR="$RUNS/$COMBO"
-    LATENTS="$MODEL_DIR/eval/latents.csv"
+    LATENTS="$MODEL_DIR/latents.csv"
     if [ ! -f "$LATENTS" ]; then
         echo "  SKIP $COMBO (no latents.csv)"
         continue
