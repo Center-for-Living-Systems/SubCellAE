@@ -45,12 +45,16 @@ from subcellae.modelling.dataset import PatchDataset, MultiChannelPatchDataset
 
 VARIANTS = [
     "semicon_both","baseline", "semisup_fa", "semisup_pos", "semisup_both",
-    "conae", "semicon_fa", "semicon_pos", 
+    "conae", "semicon_fa", "semicon_pos",
 ]
 
+KNOWN_DATASETS = {"vinc", "nih3t3", "ppax", "pfak"}
 
 # (dataset_name, condition_name, relative patch path under root_folder)
+# vinc is listed first so it appears at the left of the test-side x-axis.
 EXTERNAL_DATASETS = [
+    ("vinc",   "control", "ae_results/pax_ch_patch/cio_rb/vinc/control/tiff_patches32"),
+    ("vinc",   "ycomp",   "ae_results/pax_ch_patch/cio_rb/vinc/ycomp/tiff_patches32"),
     ("pfak",   "control", "ae_results/pax_ch_patch/cio_rb/pfak/control/tiff_patches32"),
     ("pfak",   "ycomp",   "ae_results/pax_ch_patch/cio_rb/pfak/ycomp/tiff_patches32"),
     ("ppax",   "control", "ae_results/pax_ch_patch/cio_rb/ppax/control/tiff_patches32"),
@@ -104,8 +108,10 @@ METRIC_LABELS = {
     "recon_nl1_ch1":    "Normalised L1 — actin (ch1)",
 }
 
-# External dataset groups (fixed order at right side of x-axis)
+# Test-side group order (right of the separator on the violin x-axis).
+# Datasets that were in training are skipped at eval time and won't appear here.
 EXTERNAL_GROUP_ORDER = [
+    "vinc_control",  "vinc_ycomp",
     "pfak_control",  "pfak_ycomp",
     "ppax_control",  "ppax_ycomp",
     "nih3t3_control","nih3t3_ycomp",
@@ -160,10 +166,35 @@ def _metrics_from_arrays(raws: list[np.ndarray],
     return pd.DataFrame(rows)
 
 
-# ── vinc: read from existing recon TIFs ───────────────────────────────────────
+# ── training-data metrics: read from existing recon TIFs ─────────────────────
 
-def _vinc_metrics(variant_dir: Path) -> pd.DataFrame | None:
-    """Return patch-level metrics for vinc, with FA type groups for train/val."""
+def _dataset_from_condition(condition_name: str) -> str:
+    """'ppax_control' → 'ppax', 'nih3t3_ycomp' → 'nih3t3'."""
+    for ds in KNOWN_DATASETS:
+        if condition_name == ds or condition_name.startswith(ds + "_"):
+            return ds
+    return condition_name.split("_")[0]
+
+
+def _get_training_datasets(variant_dir: Path) -> set[str]:
+    """Read the model config to find which canonical datasets were in training."""
+    cfg = _read_model_config(variant_dir)
+    datasets: set[str] = set()
+    for entry in cfg.get("data", {}).get("patch_dirs", []):
+        cond = str(entry.get("condition_name", ""))
+        ds = _dataset_from_condition(cond)
+        if ds in KNOWN_DATASETS:
+            datasets.add(ds)
+    return datasets or {"vinc"}   # safe fallback for legacy configs
+
+
+def _training_recon_metrics(variant_dir: Path) -> pd.DataFrame | None:
+    """Return patch-level metrics for training data, labeled by actual dataset.
+
+    Replaces the old _vinc_metrics which hardcoded dataset='vinc'.  Now reads
+    condition_name from patches_index.csv so that ppax, nih3t3, etc. are labeled
+    correctly.  FA-type groups are still built for vinc rows that have annotations.
+    """
     recon_dir = variant_dir / "recon"
     raw_tif   = recon_dir / "patches_raw.tif"
     rec_tif   = recon_dir / "patches_recon.tif"
@@ -177,41 +208,44 @@ def _vinc_metrics(variant_dir: Path) -> pd.DataFrame | None:
     met_df  = _metrics_from_arrays(list(raw_all), list(rec_all))
     df = pd.concat([idx_df.reset_index(drop=True), met_df.reset_index(drop=True)],
                    axis=1)
-    df["dataset"] = "vinc"
 
-    # Try to merge FA type from latents.csv
+    # Extract true dataset name from condition_name (e.g. "ppax_control" → "ppax")
+    df["dataset"] = df["condition_name"].apply(_dataset_from_condition)
+
+    # Try to merge FA annotation for vinc rows only
     lat_csv = variant_dir / "latents.csv"
-    fa_merged = False
+    fa_map: dict[str, str] = {}
     if lat_csv.exists():
-        lat_df = pd.read_csv(lat_csv)
-        if "annotation_label_name" in lat_df.columns:
-            lat_df["_stem"] = lat_df["filename"].apply(lambda p: Path(p).stem)
-            if "name" in df.columns:
-                df["_stem"] = df["name"].apply(lambda p: Path(p).stem)
-            else:
-                df["_stem"] = df.index.astype(str)
-            ann_map = (lat_df[["_stem", "annotation_label_name"]]
-                       .dropna()
-                       .drop_duplicates("_stem")
-                       .set_index("_stem")["annotation_label_name"])
-            df["fa_type"] = df["_stem"].map(ann_map)
-            # only consider rows where annotation is a real label (not NaN / -1)
-            has_fa = df["fa_type"].notna() & (df["fa_type"] != "-1")
-            if has_fa.sum() > 0:
-                fa_merged = True
+        try:
+            lat_df = pd.read_csv(lat_csv, usecols=["filename", "annotation_label_name"])
+            if "annotation_label_name" in lat_df.columns:
+                lat_df["_stem"] = lat_df["filename"].apply(lambda p: Path(p).stem)
+                valid = lat_df[lat_df["annotation_label_name"].notna()
+                               & (lat_df["annotation_label_name"] != "-1")]
+                fa_map = valid.drop_duplicates("_stem").set_index(
+                    "_stem")["annotation_label_name"].to_dict()
+        except Exception:
+            pass
 
-    # Build group column
-    if fa_merged:
-        # vinc rows with FA label: group = "vinc_{split}_{fa_type}"
-        df["group"] = df.apply(
-            lambda r: (f"vinc_{r['split']}_{r['fa_type']}"
-                       if (pd.notna(r.get("fa_type")) and r.get("fa_type") != "-1")
-                       else f"vinc_{r['split']}_unlabeled"),
-            axis=1,
-        )
+    if fa_map and "name" in df.columns:
+        df["_stem"] = df["name"].apply(lambda p: Path(p).stem)
+        df["fa_type"] = df["_stem"].map(fa_map)
     else:
-        df["group"] = df["dataset"] + "_" + df["condition_name"] + "_" + df["split"]
+        df["fa_type"] = None
 
+    def _make_group(row) -> str:
+        ds    = row["dataset"]
+        split = row.get("split", "train")
+        cond  = row["condition_name"]
+        fa    = row.get("fa_type")
+        if ds == "vinc" and pd.notna(fa) and fa != "-1":
+            return f"vinc_{split}_{fa}"
+        elif ds == "vinc":
+            return f"vinc_{split}_unlabeled"
+        else:
+            return f"{cond}_{split}"   # e.g. "ppax_control_train"
+
+    df["group"] = df.apply(_make_group, axis=1)
     return df
 
 
@@ -403,15 +437,18 @@ def _shorten(label: str) -> str:
 
 
 def _build_group_order(variant_df: pd.DataFrame) -> list[str]:
-    """Return ordered x-axis group list: vinc FA groups first, then external."""
-    # vinc groups: sorted by split then fa_type
-    vinc_groups = sorted(
-        g for g in variant_df["group"].unique()
-        if g.startswith("vinc_")
+    """Return ordered x-axis group list: training groups first, then test groups.
+
+    Training groups: anything with split in {train, val} — sorted alphabetically.
+    Test groups: the canonical EXTERNAL_GROUP_ORDER entries that are present.
+    """
+    ext_set = set(EXTERNAL_GROUP_ORDER)
+    train_groups = sorted(
+        g for g in variant_df["group"].unique() if g not in ext_set
     )
-    ext_groups = [g for g in EXTERNAL_GROUP_ORDER
-                  if g in variant_df["group"].values]
-    return vinc_groups + ext_groups
+    test_groups = [g for g in EXTERNAL_GROUP_ORDER
+                   if g in variant_df["group"].values]
+    return train_groups + test_groups
 
 
 def _violin_plot_single(variant_df: pd.DataFrame, variant_name: str,
@@ -448,10 +485,11 @@ def _violin_plot_single(variant_df: pd.DataFrame, variant_name: str,
         ymin = float(sub[metric].quantile(0.001))
         ax.set_ylim(max(0, ymin * 0.95), y99 * 1.05)
 
-    # vertical separator between vinc and external groups
-    n_vinc = sum(1 for g in present if g.startswith("vinc_"))
-    if 0 < n_vinc < len(present):
-        ax.axvline(n_vinc - 0.5, color="grey", linestyle="--", linewidth=0.8)
+    # vertical separator between training groups and test groups
+    ext_set = set(EXTERNAL_GROUP_ORDER)
+    n_train = sum(1 for g in present if g not in ext_set)
+    if 0 < n_train < len(present):
+        ax.axvline(n_train - 0.5, color="grey", linestyle="--", linewidth=0.8)
 
     plt.tight_layout()
     fig.savefig(str(save_path), dpi=150)
@@ -548,31 +586,38 @@ def _run_variant(variant: str, variant_dir: Path, run_dir: Path,
         return None
 
     print(f"── {variant} ──────────────────────────────")
-    input_divisor = _read_input_divisor(variant_dir)
-    ch3_model     = _is_ch3_model(variant_dir)
+    input_divisor    = _read_input_divisor(variant_dir)
+    ch3_model        = _is_ch3_model(variant_dir)
+    training_datasets = _get_training_datasets(variant_dir)
     # auto-detect 2ch models even when --two-channel flag was not passed
     if not two_channel:
         two_channel = _is_2ch_model(variant_dir)
-    ext_ds_list   = EXTERNAL_DATASETS_CH3 if ch3_model else EXTERNAL_DATASETS
-    print(f"  input_divisor: {input_divisor}  ch3_model: {ch3_model}  two_channel: {two_channel}")
+    ext_ds_list = EXTERNAL_DATASETS_CH3 if ch3_model else EXTERNAL_DATASETS
+    print(f"  input_divisor: {input_divisor}  ch3_model: {ch3_model}"
+          f"  two_channel: {two_channel}  training_datasets: {sorted(training_datasets)}")
     variant_rows = []
 
-    # 1. vinc from existing recon TIFs (works for both 1ch and 2ch — metrics in latents.csv)
-    vinc_df = _vinc_metrics(variant_dir)
-    if vinc_df is not None:
-        vinc_df["variant"] = variant
-        variant_rows.append(vinc_df)
-        print(f"  vinc: {len(vinc_df)} patches, {vinc_df['group'].nunique()} groups")
+    # 1. Training data from existing recon TIFs (correctly labeled by actual dataset)
+    train_df = _training_recon_metrics(variant_dir)
+    if train_df is not None:
+        train_df["variant"] = variant
+        variant_rows.append(train_df)
+        print(f"  training recon: {len(train_df)} patches, "
+              f"datasets={sorted(train_df['dataset'].unique())}, "
+              f"{train_df['group'].nunique()} groups")
     else:
-        print(f"  vinc: recon TIFs not found — skipping")
+        print(f"  training recon: TIFs not found — skipping")
 
-    # 2. external datasets — load model once
+    # 2. External / test datasets — skip any that were in training (already covered above)
     print(f"  loading model …", flush=True)
     model = torch.load(str(model_pt), map_location=device, weights_only=False)
     model.eval()
 
     if two_channel:
         for ds_name, cond_name, ch1_rel, ch3_rel in EXTERNAL_DATASETS_2CH:
+            if ds_name in training_datasets:
+                print(f"    [skip] {ds_name}/{cond_name} — in training data")
+                continue
             ch1_dir = root_folder / ch1_rel
             ch3_dir = root_folder / ch3_rel
             ext_df = _external_metrics_2ch(model, ds_name, cond_name,
@@ -583,6 +628,9 @@ def _run_variant(variant: str, variant_dir: Path, run_dir: Path,
                 variant_rows.append(ext_df)
     else:
         for ds_name, cond_name, rel_path in ext_ds_list:
+            if ds_name in training_datasets:
+                print(f"    [skip] {ds_name}/{cond_name} — in training data")
+                continue
             patch_dir = root_folder / rel_path
             hist_map  = _load_hist_map_for_ds(hist_map_dir, ds_name)
             ext_df = _external_metrics(model, ds_name, cond_name,
