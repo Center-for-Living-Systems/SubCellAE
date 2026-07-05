@@ -212,8 +212,10 @@ def _training_recon_metrics(variant_dir: Path) -> pd.DataFrame | None:
     # Extract true dataset name from condition_name (e.g. "ppax_control" → "ppax")
     df["dataset"] = df["condition_name"].apply(_dataset_from_condition)
 
-    # Group by condition_name + split, consistent across all datasets
-    df["group"] = df["condition_name"] + "_" + df["split"]  # e.g. "vinc_control_train"
+    # Prefix training groups with "tr:" so the separator logic can distinguish them
+    # from test groups (which share the same condition_name format).
+    # Display labels strip this prefix, so the x-axis shows just "vinc_control" etc.
+    df["group"] = "tr:" + df["condition_name"]   # e.g. "tr:vinc_control"
     return df
 
 
@@ -398,7 +400,7 @@ _LABEL_SUBS = [
 def _shorten(label: str) -> str:
     """Abbreviate long group labels for compact x-axis display."""
     import re
-    result = label
+    result = label.removeprefix("tr:")   # strip training prefix, keep just condition
     for long, short in _LABEL_SUBS:
         result = re.sub(re.escape(long), short, result, flags=re.IGNORECASE)
     return result
@@ -407,12 +409,11 @@ def _shorten(label: str) -> str:
 def _build_group_order(variant_df: pd.DataFrame) -> list[str]:
     """Return ordered x-axis group list: training groups first, then test groups.
 
-    Training groups: anything with split in {train, val} — sorted alphabetically.
+    Training groups: those prefixed with 'tr:' (sorted alphabetically).
     Test groups: the canonical EXTERNAL_GROUP_ORDER entries that are present.
     """
-    ext_set = set(EXTERNAL_GROUP_ORDER)
     train_groups = sorted(
-        g for g in variant_df["group"].unique() if g not in ext_set
+        g for g in variant_df["group"].unique() if g.startswith("tr:")
     )
     test_groups = [g for g in EXTERNAL_GROUP_ORDER
                    if g in variant_df["group"].values]
@@ -453,9 +454,8 @@ def _violin_plot_single(variant_df: pd.DataFrame, variant_name: str,
         ymin = float(sub[metric].quantile(0.001))
         ax.set_ylim(max(0, ymin * 0.95), y99 * 1.05)
 
-    # vertical separator between training groups and test groups
-    ext_set = set(EXTERNAL_GROUP_ORDER)
-    n_train = sum(1 for g in present if g not in ext_set)
+    # vertical separator between training groups (tr: prefix) and test groups
+    n_train = sum(1 for g in present if g.startswith("tr:"))
     if 0 < n_train < len(present):
         ax.axvline(n_train - 0.5, color="grey", linestyle="--", linewidth=0.8)
 
