@@ -69,7 +69,7 @@ GROUPS_UMAP   = [SINGLES, PAIRS_A, PAIRS_B, TRIPLES, ALL_DS]
 DATASETS_ORDERED = ["vinc", "pfak", "ppax", "nih3t3"]
 
 DS_LABEL = {
-    "vinc":   "ds1 vinc\n(train)",
+    "vinc":   "ds1 vinc",
     "pfak":   "ds2 pfak",
     "ppax":   "ds3 ppax",
     "nih3t3": "ds4 nih3t3",
@@ -386,8 +386,8 @@ def _slide_mean_table(prs: Presentation) -> None:
     slide = _add_slide(prs)
     _slide_header(slide,
                   "Summary — Mean Normalised L1 per Model × Dataset",
-                  subtitle="Lower = better  ·  vinc = train set  ·  "
-                           "pfak / ppax / nih3t3 = unseen test sets",
+                  subtitle="Lower = better  ·  training datasets depend on combo  ·  "
+                           "non-training datasets = unseen test",
                   color=C_TITLE)
 
     datasets = DATASETS_ORDERED
