@@ -51,6 +51,7 @@ from subcellae.modelling.autoencoders import (
     ContrastiveAE, train_contrastive_ae,
     train_supervised_contrastive_ae,
 )
+from subcellae.modelling.intensity_transform import make_log_map
 
 log = logging.getLogger(__name__)
 
@@ -214,6 +215,8 @@ class AEConfig:
 
     # --- reconstruction output ---
     save_recon: bool       = True   # whether to write reconstruction images
+    compact_recon: bool    = False  # sweep mode: skip raw TIFs, limit recon to 4 images
+                                    # (1st train+val per condition); saves ~10× disk space
     recon_pad_size: int    = 64     # padding used during patch extraction; subtracted
                                     # to convert padded → original image coordinates
     recon_image_size: int  = 1024   # fixed canvas height/width (px) for whole-image tifs
@@ -258,6 +261,16 @@ class AEConfig:
     output_sigmoid: bool             = True
     recon_loss_type: str             = "mse"   # "mse", "l1", "nmse", "nl1"
     lambda_hessian: float            = 0.0     # additive Hessian-L1 regulariser weight
+
+    # --- patch input divisor (non-enlcrop path; mirrors enlarged_crop_input_divisor) ---
+    patch_input_divisor: float = 1.0  # divide raw patch values by this factor at load time
+
+    # --- shifted-log intensity mapping (applied inside training loop) ---
+    # When enabled: x_ciorb → log_map_forward(x) → model → log_map_inverse → metrics
+    log_map_enabled: bool  = False
+    log_map_x_min: float   = -0.03   # lower bound → 0 in log space; covers global min -0.0296
+    log_map_x_ref: float   = 10.0    # upper reference → 1 in log space; covers max ~10.7
+    log_map_delta: float   = 0.5     # compression strength
 
     def __post_init__(self):
         # Coerce and create result_dir
@@ -306,6 +319,7 @@ def _extract_group_key(path: str) -> str:
 def _grouped_train_val_split(
     datasets: list,
     val_split: float,
+    per_ds_val_splits: list | None = None,
     seed: int = 42,
 ) -> tuple:
     """Split dataset indices so all patches from the same image stay together.
@@ -315,7 +329,13 @@ def _grouped_train_val_split(
     datasets : list
         Individual dataset objects (each must have a ``paths`` attribute).
     val_split : float
-        Fraction of *images* (groups) to hold out for validation.
+        Global fraction of *images* (groups) to hold out for validation.
+        Used when ``per_ds_val_splits`` is None.
+    per_ds_val_splits : list[float] | None
+        Per-dataset val_split fractions (one per element of ``datasets``).
+        When provided, each dataset is split independently with its own
+        fraction, using a fresh RandomState(seed) for each dataset so
+        repeated datasets (same paths) get identical splits.
     seed : int
         Random seed for reproducibility.
 
@@ -324,27 +344,52 @@ def _grouped_train_val_split(
     train_indices, val_indices : list[int], list[int]
         Flat indices into the concatenated dataset.
     """
-    # Collect all paths in concatenated order
-    all_paths = []
-    for ds in datasets:
-        all_paths.extend(getattr(ds, "paths", []))
+    if per_ds_val_splits is None:
+        # Original behaviour: pool all groups across all datasets, split globally.
+        all_paths = []
+        for ds in datasets:
+            all_paths.extend(getattr(ds, "paths", []))
 
-    # Map group key → list of flat indices
-    group_to_indices: dict = defaultdict(list)
-    for idx, path in enumerate(all_paths):
-        group_to_indices[_extract_group_key(path)].append(idx)
+        group_to_indices: dict = defaultdict(list)
+        for idx, path in enumerate(all_paths):
+            group_to_indices[_extract_group_key(path)].append(idx)
 
-    groups = sorted(group_to_indices.keys())
-    rng = np.random.RandomState(seed)
-    rng.shuffle(groups)
+        groups = sorted(group_to_indices.keys())
+        rng = np.random.RandomState(seed)
+        rng.shuffle(groups)
 
-    n_val = max(1, int(len(groups) * val_split))
-    val_groups  = set(groups[:n_val])
-    train_groups = set(groups[n_val:])
+        n_val = max(1, int(len(groups) * val_split))
+        val_groups   = set(groups[:n_val])
+        train_groups = set(groups[n_val:])
 
-    train_indices = [i for g in sorted(train_groups) for i in group_to_indices[g]]
-    val_indices   = [i for g in sorted(val_groups)   for i in group_to_indices[g]]
-    return train_indices, val_indices
+        train_indices = [i for g in sorted(train_groups) for i in group_to_indices[g]]
+        val_indices   = [i for g in sorted(val_groups)   for i in group_to_indices[g]]
+        return train_indices, val_indices
+    else:
+        # Per-dataset split: each dataset is split independently.
+        # Using a fresh RandomState(seed) per dataset ensures repeated datasets
+        # (same paths, different repeat index) always produce identical splits.
+        train_indices, val_indices = [], []
+        offset = 0
+        for ds, ds_val_split in zip(datasets, per_ds_val_splits):
+            ds_paths = getattr(ds, "paths", [])
+            group_to_local: dict = defaultdict(list)
+            for local_idx, path in enumerate(ds_paths):
+                group_to_local[_extract_group_key(path)].append(local_idx)
+
+            groups = sorted(group_to_local.keys())
+            rng = np.random.RandomState(seed)
+            rng.shuffle(groups)
+
+            n_val = max(1, int(len(groups) * ds_val_split))
+            val_gs   = set(groups[:n_val])
+            train_gs = set(groups[n_val:])
+
+            train_indices.extend(offset + i for g in sorted(train_gs) for i in group_to_local[g])
+            val_indices.extend(  offset + i for g in sorted(val_gs)   for i in group_to_local[g])
+            offset += len(ds)
+
+        return train_indices, val_indices
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +452,8 @@ def _patch_hessian_l1(raw: np.ndarray, recon: np.ndarray) -> float:
     return float(np.mean(H_diff))
 
 
-def _extract_latents(model, loader, device: str, model_type: str, input_ps: int = 32) -> dict:
+def _extract_latents(model, loader, device: str, model_type: str, input_ps: int = 32,
+                     log_map_fn=None, log_map_inv_fn=None) -> dict:
     """Run inference over *loader* and collect per-patch latents and reconstructions.
 
     Returns
@@ -427,18 +473,21 @@ def _extract_latents(model, loader, device: str, model_type: str, input_ps: int 
 
     with torch.no_grad():
         for batch in loader:
-            x            = batch[0].to(device)  # (B, C, H, W)
+            x_raw        = batch[0].to(device)  # (B, C, H, W) — original CIO-RB values
             conditions   = batch[1]             # int tensor
             ann_labels   = batch[2]             # int tensor (-1 = unlabelled)
             ann_labels_2 = batch[3]             # int tensor, second label or -1
             paths        = batch[4]             # list of str
 
             # Center-crop enlarged-context patches before model inference
-            if x.shape[-1] != input_ps:
-                h, w = x.shape[-2:]
+            if x_raw.shape[-1] != input_ps:
+                h, w = x_raw.shape[-2:]
                 top  = (h - input_ps) // 2
                 left = (w - input_ps) // 2
-                x    = x[:, :, top:top+input_ps, left:left+input_ps]
+                x_raw = x_raw[:, :, top:top+input_ps, left:left+input_ps]
+
+            # Apply log mapping (if enabled); model sees log-space values
+            x = log_map_fn(x_raw) if log_map_fn is not None else x_raw
 
             if model_type == "ae":
                 x_hat, z = model(x)
@@ -458,9 +507,12 @@ def _extract_latents(model, loader, device: str, model_type: str, input_ps: int 
             all_ann_labels_2.extend(ann_labels_2.tolist())
             all_latents.append(z.cpu().numpy())
 
-            # Store raw and recon: (H, W) for single-channel, (C, H, W) for multi
-            raw_np   = x.cpu().numpy()      # (B, C, H, W)
-            recon_np = x_hat.cpu().numpy()  # (B, C, H, W)
+            # Inverse-map to CIO-RB space so metrics are in original intensity units
+            raw_np   = x_raw.cpu().numpy()  # always original CIO-RB (B, C, H, W)
+            if log_map_inv_fn is not None:
+                recon_np = log_map_inv_fn(x_hat).cpu().numpy()
+            else:
+                recon_np = x_hat.cpu().numpy()
             for raw_patch, recon_patch in zip(raw_np, recon_np):
                 if raw_patch.shape[0] == 1:   # single-channel → squeeze to (H, W)
                     raw_patch   = raw_patch[0]
@@ -687,11 +739,34 @@ def _save_reconstructions(
 
             canvas_data[group][split_name].append((r0, r1, c0, c1, raw_p, recon_p))
 
+    # ---- 1b. compact_recon: keep only 1 source image per (condition, split) ----
+    if cfg.compact_recon:
+        _seen_keys: set = set()
+        _selected_groups: set = set()
+        for row in stack_index:
+            key = (row["condition_name"], row["split"])
+            if key not in _seen_keys:
+                _seen_keys.add(key)
+                _selected_groups.add(row["group"])
+        _kept_idx, _kept_raw, _kept_recon = [], [], []
+        for row, raw_p, recon_p in zip(stack_index, stack_raw, stack_recon):
+            if row["group"] in _selected_groups:
+                _kept_idx.append({**row, "frame": len(_kept_idx)})
+                _kept_raw.append(raw_p)
+                _kept_recon.append(recon_p)
+        stack_index, stack_raw, stack_recon = _kept_idx, _kept_raw, _kept_recon
+        _compact_groups: set | None = _selected_groups & set(canvas_data.keys())
+        log.info("compact_recon: keeping %d source images → %s",
+                 len(_compact_groups), sorted(_compact_groups))
+    else:
+        _compact_groups = None
+
     # ---- 2. write stacked patch TIFFs + companion CSV ----
     if stack_raw:
         raw_stack   = np.stack(stack_raw,   axis=0)   # (N, [C,] H, W)
         recon_stack = np.stack(stack_recon, axis=0)
-        tifffile.imwrite(str(recon_dir / "patches_raw.tif"),   raw_stack,   imagej=True)
+        if not cfg.compact_recon:
+            tifffile.imwrite(str(recon_dir / "patches_raw.tif"), raw_stack, imagej=True)
         tifffile.imwrite(str(recon_dir / "patches_recon.tif"), recon_stack, imagej=True)
         idx_df = pd.DataFrame(stack_index)
         idx_df.to_csv(recon_dir / "patches_index.csv", index=False)
@@ -705,7 +780,7 @@ def _save_reconstructions(
     #   recon/visual.tif        — (N, H, W, 3) uint8 stack, one frame per group
     #   recon/visual_index.csv  — frame, group
     img_size = cfg.recon_image_size
-    all_groups = sorted(set(canvas_data.keys()))
+    all_groups = sorted(_compact_groups if _compact_groups is not None else set(canvas_data.keys()))
 
     img_stack_raw:   list = []
     img_stack_recon: list = []
@@ -768,8 +843,9 @@ def _save_reconstructions(
 
     # ---- 4. write image and visual stacked TIFFs + CSVs ----
     if img_stack_raw:
-        tifffile.imwrite(str(recon_dir / "images_raw.tif"),
-                         np.stack(img_stack_raw,   axis=0), imagej=True)
+        if not cfg.compact_recon:
+            tifffile.imwrite(str(recon_dir / "images_raw.tif"),
+                             np.stack(img_stack_raw, axis=0), imagej=True)
         tifffile.imwrite(str(recon_dir / "images_recon.tif"),
                          np.stack(img_stack_recon, axis=0), imagej=True)
         pd.DataFrame(img_stack_index).to_csv(recon_dir / "images_index.csv", index=False)
@@ -856,7 +932,10 @@ def run_ae_pipeline(cfg: AEConfig):
     # Transform: expand (H, W) numpy array → (1, H, W) before the dataset
     # class wraps it in a torch tensor.  Patches are already float32 in [0, 1].
     def _channel_expand(x: np.ndarray) -> np.ndarray:
-        return np.expand_dims(x, 0)
+        out = np.expand_dims(x, 0)
+        if cfg.patch_input_divisor != 1.0:
+            out = out / cfg.patch_input_divisor
+        return out
 
     def _load_hist_map(map_dir: str, patch_path: str):
         """Auto-detect dataset name from patch path and load its .npz map."""
@@ -876,6 +955,7 @@ def run_ae_pipeline(cfg: AEConfig):
         return hmap
 
     datasets = []
+    per_ds_val_splits_raw = []   # None or float per entry; None = use global cfg.val_split
     for entry in cfg.patch_dirs:
         condition      = int(entry.get("condition", entry.get("label", 0)))
         condition_name = str(entry.get("condition_name", str(condition)))
@@ -977,6 +1057,7 @@ def run_ae_pipeline(cfg: AEConfig):
             cfg.num_classes_2 = ds.num_classes_2
             log.info("  annotation2: %d classes via %r  mapping: %s",
                      ds.num_classes_2, cfg.label_col_2, ds.label_to_int_2)
+        per_ds_val_splits_raw.append(entry.get("val_split", None))
         datasets.append(ds)
 
     if not datasets:
@@ -990,8 +1071,14 @@ def run_ae_pipeline(cfg: AEConfig):
     # 3. Train / val split
     # ------------------------------------------------------------------
     if cfg.group_split:
+        # Use per-dataset val_split if any entry specifies one; otherwise global.
+        has_per_ds = any(v is not None for v in per_ds_val_splits_raw)
+        per_ds_val_splits = (
+            [v if v is not None else cfg.val_split for v in per_ds_val_splits_raw]
+            if has_per_ds else None
+        )
         train_indices, val_indices = _grouped_train_val_split(
-            datasets, cfg.val_split
+            datasets, cfg.val_split, per_ds_val_splits=per_ds_val_splits
         )
         train_ds = Subset(full_dataset, train_indices)
         val_ds   = Subset(full_dataset, val_indices)
@@ -1080,6 +1167,19 @@ def run_ae_pipeline(cfg: AEConfig):
     # ------------------------------------------------------------------
     # 6. Train
     # ------------------------------------------------------------------
+
+    # Build log-map callables (None when disabled)
+    if cfg.log_map_enabled:
+        _log_map_fn, _log_map_inv_fn = make_log_map(
+            x_min=cfg.log_map_x_min,
+            x_ref=cfg.log_map_x_ref,
+            delta=cfg.log_map_delta,
+        )
+        log.info("  log_map enabled: x_min=%.3f  x_ref=%.1f  delta=%.2f",
+                 cfg.log_map_x_min, cfg.log_map_x_ref, cfg.log_map_delta)
+    else:
+        _log_map_fn = _log_map_inv_fn = None
+
     result_dir_str = str(cfg.result_dir)
 
     _sched_kwargs = dict(
@@ -1155,6 +1255,8 @@ def run_ae_pipeline(cfg: AEConfig):
             enlarged_crop_max_angle=cfg.enlarged_crop_max_angle if cfg.enlarged_crop else 0.0,
             recon_loss_type=cfg.recon_loss_type,
             lambda_hessian=cfg.lambda_hessian,
+            log_map_fn=_log_map_fn,
+            log_map_inv_fn=_log_map_inv_fn,
         )
 
     else:  # "supcon"
@@ -1179,6 +1281,8 @@ def run_ae_pipeline(cfg: AEConfig):
             enlarged_crop_max_angle=cfg.enlarged_crop_max_angle if cfg.enlarged_crop else 0.0,
             recon_loss_type=cfg.recon_loss_type,
             lambda_hessian=cfg.lambda_hessian,
+            log_map_fn=_log_map_fn,
+            log_map_inv_fn=_log_map_inv_fn,
         )
 
     # ------------------------------------------------------------------
@@ -1199,8 +1303,12 @@ def run_ae_pipeline(cfg: AEConfig):
     val_loader_ordered = DataLoader(
         val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0
     )
-    train_result = _extract_latents(model, train_loader_ordered, cfg.device, cfg.model_type, input_ps=cfg.input_ps)
-    val_result   = _extract_latents(model, val_loader_ordered,   cfg.device, cfg.model_type, input_ps=cfg.input_ps)
+    train_result = _extract_latents(model, train_loader_ordered, cfg.device, cfg.model_type,
+                                    input_ps=cfg.input_ps,
+                                    log_map_fn=_log_map_fn, log_map_inv_fn=_log_map_inv_fn)
+    val_result   = _extract_latents(model, val_loader_ordered,   cfg.device, cfg.model_type,
+                                    input_ps=cfg.input_ps,
+                                    log_map_fn=_log_map_fn, log_map_inv_fn=_log_map_inv_fn)
 
     csv_path = _save_latent_csv(
         train_result, val_result,

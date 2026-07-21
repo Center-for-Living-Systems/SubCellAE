@@ -1339,6 +1339,8 @@ def train_contrastive_ae(
     enlarged_crop_max_angle: float = 0.0,
     recon_loss_type: str         = "mse",
     lambda_hessian: float        = 0.0,
+    log_map_fn                   = None,  # callable(x_tensor) → log-mapped tensor
+    log_map_inv_fn               = None,  # callable(x_tensor) → original-space tensor
 ):
     """
     Training loop for ContrastiveAE (self-supervised NT-Xent).
@@ -1397,6 +1399,8 @@ def train_contrastive_ae(
 
         for batch in train_loader:
             x = batch[0].to(device)
+            if log_map_fn is not None:
+                x = log_map_fn(x)
 
             # --- two views (enlarged-crop or standard path) ---
             if x.shape[-1] > patch_size:
@@ -1430,10 +1434,12 @@ def train_contrastive_ae(
         train_losses.append(tl); train_recon.append(tr); train_contrast.append(tc)
 
         model.eval()
-        vl = vr = vc = 0.0
+        vl = vr = vc = vo = 0.0
         with torch.no_grad():
             for batch in val_loader:
                 x = batch[0].to(device)
+                if log_map_fn is not None:
+                    x = log_map_fn(x)
                 if x.shape[-1] > patch_size:
                     view1 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
                     view2 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
@@ -1458,9 +1464,11 @@ def train_contrastive_ae(
                     lambda_hessian=lambda_hessian,
                 )
                 vl += loss.item(); vr += rl.item(); vc += cl.item()
+                if log_map_inv_fn is not None:
+                    vo += F.l1_loss(log_map_inv_fn(recon), log_map_inv_fn(view1)).item()
 
         n = len(val_loader)
-        vl /= n; vr /= n; vc /= n
+        vl /= n; vr /= n; vc /= n; vo /= n
         val_losses.append(vl); val_recon.append(vr); val_contrast.append(vc)
 
         # LR scheduler: skip during warmup; reset at transition
@@ -1482,10 +1490,11 @@ def train_contrastive_ae(
 
         if (epoch + 1) % error_print_period == 0:
             phase_str = " [warmup]" if in_warmup else ""
+            orig_str = f"  orig_L1={vo:.4f}" if log_map_inv_fn is not None else ""
             print(
                 f"Contrastive  epoch {epoch+1}/{epochs}{phase_str} | "
                 f"train total={tl:.4f} recon={tr:.4f} contrast={tc:.4f} | "
-                f"val   total={vl:.4f} recon={vr:.4f} contrast={vc:.4f}",
+                f"val   total={vl:.4f} recon={vr:.4f} contrast={vc:.4f}{orig_str}",
                 flush=True,
             )
 
@@ -1499,6 +1508,8 @@ def train_contrastive_ae(
             with torch.no_grad():
                 for batch in val_loader:
                     x = batch[0].to(device)
+                    if log_map_fn is not None:
+                        x = log_map_fn(x)
                     if x.shape[-1] > patch_size:
                         view1 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
                         view2 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
@@ -1552,6 +1563,7 @@ def train_contrastive_ae(
         train_recon, val_recon, train_contrast, val_contrast,
         train_losses, val_losses, result_dir,
         prefix="contrastive", title="Contrastive AE",
+        recon_loss_type=recon_loss_type,
     )
     return best_model, train_losses, val_losses
 
@@ -1581,6 +1593,8 @@ def train_supervised_contrastive_ae(
     enlarged_crop_max_angle: float = 0.0,
     recon_loss_type: str         = "mse",
     lambda_hessian: float        = 0.0,
+    log_map_fn                   = None,  # callable(x_tensor) → log-mapped tensor
+    log_map_inv_fn               = None,  # callable(x_tensor) → original-space tensor
 ):
     """
     Training loop for ContrastiveAE with Supervised Contrastive loss (SupCon).
@@ -1633,6 +1647,8 @@ def train_supervised_contrastive_ae(
         for batch in train_loader:
             x      = batch[0].to(device)
             labels = batch[2].to(device)   # annotation_label; -1 if unlabeled
+            if log_map_fn is not None:
+                x = log_map_fn(x)
 
             if x.shape[-1] > patch_size:
                 view1 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
@@ -1674,11 +1690,13 @@ def train_supervised_contrastive_ae(
         train_losses.append(tl); train_recon.append(tr); train_contrast.append(tc)
 
         model.eval()
-        vl = vr = vc = 0.0
+        vl = vr = vc = vo = 0.0
         with torch.no_grad():
             for batch in val_loader:
                 x      = batch[0].to(device)
                 labels = batch[2].to(device)
+                if log_map_fn is not None:
+                    x = log_map_fn(x)
                 if x.shape[-1] > patch_size:
                     view1 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
                     view2 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
@@ -1711,9 +1729,11 @@ def train_supervised_contrastive_ae(
                 loss = lambda_recon * rl + eff_lambda_contrast * cl
 
                 vl += loss.item(); vr += rl.item(); vc += cl.item()
+                if log_map_inv_fn is not None:
+                    vo += F.l1_loss(log_map_inv_fn(recon), log_map_inv_fn(view1)).item()
 
         n = len(val_loader)
-        vl /= n; vr /= n; vc /= n
+        vl /= n; vr /= n; vc /= n; vo /= n
         val_losses.append(vl); val_recon.append(vr); val_contrast.append(vc)
 
         # LR scheduler: skip during warmup; reset at transition
@@ -1736,10 +1756,11 @@ def train_supervised_contrastive_ae(
 
         if (epoch + 1) % error_print_period == 0:
             phase_str = " [warmup]" if in_warmup else ""
+            orig_str = f"  orig_L1={vo:.4f}" if log_map_inv_fn is not None else ""
             print(
                 f"SupCon AE  epoch {epoch+1}/{epochs}{phase_str} | "
                 f"train total={tl:.4f} recon={tr:.4f} contrast={tc:.4f} | "
-                f"val   total={vl:.4f} recon={vr:.4f} contrast={vc:.4f}",
+                f"val   total={vl:.4f} recon={vr:.4f} contrast={vc:.4f}{orig_str}",
                 flush=True,
             )
 
@@ -1752,6 +1773,8 @@ def train_supervised_contrastive_ae(
             with torch.no_grad():
                 for batch in val_loader:
                     x     = batch[0].to(device)
+                    if log_map_fn is not None:
+                        x = log_map_fn(x)
                     if x.shape[-1] > patch_size:
                         view1 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
                         view2 = _jitter_rot_crop(x, enlarged_crop_max_shift, enlarged_crop_max_angle, patch_size)
@@ -1806,6 +1829,7 @@ def train_supervised_contrastive_ae(
         train_recon, val_recon, train_contrast, val_contrast,
         train_losses, val_losses, result_dir,
         prefix="supcon", title="SupCon AE",
+        recon_loss_type=recon_loss_type,
     )
     return best_model, train_losses, val_losses
 
@@ -1881,16 +1905,21 @@ def _save_contrastive_component_curves(
     result_dir: str,
     prefix: str = "contrastive",
     title: str  = "Contrastive AE",
+    recon_loss_type: str = "mse",
 ):
     """Three-panel loss figure: total | reconstruction | contrastive."""
     epochs = len(train_total)
     xs = range(epochs)
 
+    _recon_labels = {"nl1": "Reconstruction (nL1)", "nmse": "Reconstruction (nMSE)",
+                     "l1": "Reconstruction (L1)", "mse": "Reconstruction (MSE)"}
+    recon_label = _recon_labels.get(recon_loss_type, f"Reconstruction ({recon_loss_type})")
+
     fig, axes = plt.subplots(1, 3, figsize=(15, 4), sharey=False)
 
     panels = [
         (axes[0], train_total,    val_total,    "Total loss"),
-        (axes[1], train_recon,    val_recon,    "Reconstruction (MSE)"),
+        (axes[1], train_recon,    val_recon,    recon_label),
         (axes[2], train_contrast, val_contrast, "Contrastive loss"),
     ]
     for ax, tr, va, subtitle in panels:

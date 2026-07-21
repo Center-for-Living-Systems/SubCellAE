@@ -3,10 +3,11 @@
 KMeans clustering + center-patch panels for a trained AE model.
 
 For each cluster, finds the N_PANEL patches closest to the cluster centroid
-in latent space and saves a 4×4 panel as a grayscale float32 TIFF.
+in latent space and saves a panel as a grayscale float32 TIFF.
+Multi-channel models (2ch, 3ch, 4ch) show one row of patches per channel.
 
 Output: <result_dir>/eval/cluster_panels/
-  cluster_{k:02d}_n{total}.tif   — 4×4 panel, 16 patches nearest to centroid
+  cluster_{k:02d}_n{total}.tif   — panel, 16 patches nearest to centroid
   cluster_labels.csv             — per-patch cluster assignment + distance
 
 Usage:
@@ -22,6 +23,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tifffile
+import yaml
 from PIL import Image, ImageDraw, ImageFont
 from sklearn.cluster import KMeans
 
@@ -70,45 +72,60 @@ def _scatter(emb: np.ndarray, labels, label_order: list, title: str,
 
 
 def _make_panel(patches: list[np.ndarray], title: str,
+                ch_names: list[str] | None = None,
                 cols: int = COLS, gap: int = GAP) -> np.ndarray:
     """
     Build a grayscale float32 panel from a list of patches.
-    For 1-ch patches (H, W): standard 4×4 grid.
-    For 2-ch patches (2, H, W): paxillin section on top, actin on bottom,
-    each with its own label bar.
+    Single-channel (H,W): one 4×4 grid.
+    Multi-channel (C,H,W): one 4×4 grid per channel, each with a label bar.
+    ch_names: display labels per channel (e.g. ["vinc","pax","zyx","act"]).
     """
     if not patches:
         return np.zeros((1, 1), dtype=np.float32)
 
-    two_ch = patches[0].ndim == 3 and patches[0].shape[0] == 2
+    p0      = patches[0]
+    n_ch    = p0.shape[0] if p0.ndim == 3 else 1
+    ps      = p0.shape[-1]
+    rows    = (N_PANEL + cols - 1) // cols
+    cell    = ps + gap
+    W       = cols * cell - gap
+    H_grid  = rows * cell - gap
 
-    ps   = patches[0].shape[-1]   # patch side (32)
-    rows = (N_PANEL + cols - 1) // cols
-    cell = ps + gap
-    W    = cols * cell - gap
-    H_grid = rows * cell - gap
+    if ch_names is None:
+        ch_names = [f"ch{i}" for i in range(n_ch)]
 
     def _fill_grid(ch_idx):
         canvas = np.zeros((H_grid, W), dtype=np.float32)
         for idx, p in enumerate(patches[:N_PANEL]):
             r, c = idx // cols, idx % cols
             y0, x0 = r * cell, c * cell
-            patch = p[ch_idx] if two_ch else p
+            patch = p[ch_idx] if n_ch > 1 else p
             patch = patch.astype(np.float32)
             lo, hi = float(patch.min()), float(patch.max())
             canvas[y0:y0+ps, x0:x0+ps] = (patch - lo) / (hi - lo + 1e-8)
         return canvas
 
-    title_bar = _title_bar(W, title)
+    parts = [_title_bar(W, title)]
+    for ci in range(n_ch):
+        lbl = ch_names[ci] if ci < len(ch_names) else f"ch{ci}"
+        parts.append(_title_bar(W, lbl, height=16))
+        parts.append(_fill_grid(ci))
 
-    if two_ch:
-        pax_bar = _title_bar(W, "Paxillin (ch0)", height=16)
-        act_bar = _title_bar(W, "Actin (ch1)",    height=16)
-        return np.concatenate(
-            [title_bar, pax_bar, _fill_grid(0), act_bar, _fill_grid(1)],
-            axis=0)
-    else:
-        return np.concatenate([title_bar, _fill_grid(0)], axis=0)
+    return np.concatenate(parts, axis=0)
+
+
+def _read_ch_names(result_dir: Path) -> list[str] | None:
+    """Read channel names from config YAML copied into result_dir at training time."""
+    for yf in list(result_dir.glob("*.yaml")) + list(result_dir.glob("*.yml")):
+        with open(yf) as fh:
+            cfg = yaml.safe_load(fh) or {}
+        ch = cfg.get("enlarged_crop", {}).get("channel", None)
+        if ch is None:
+            break
+        if isinstance(ch, list):
+            return [str(c) for c in ch]
+        return [str(ch)]   # single-channel: just one name, for display
+    return None
 
 
 def run(result_dir: Path, k: int = 10, n_panel: int = N_PANEL):
@@ -122,6 +139,9 @@ def run(result_dir: Path, k: int = 10, n_panel: int = N_PANEL):
     for p in [idx_path, raw_tif]:
         if not p.exists():
             sys.exit(f"Missing: {p}")
+
+    ch_names = _read_ch_names(result_dir)
+    print(f"  Channel names: {ch_names}", flush=True)
 
     out_dir = result_dir / "eval" / "cluster_panels"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -177,7 +197,7 @@ def run(result_dir: Path, k: int = 10, n_panel: int = N_PANEL):
             patches.append(raw_p.astype(np.float32))
 
         title  = f"Cluster {ki:02d}  (N={n_total})  {n_panel} nearest to centroid"
-        panel  = _make_panel(patches, title)
+        panel  = _make_panel(patches, title, ch_names=ch_names)
 
         fname  = out_dir / f"cluster_{ki:02d}_n{n_total}.tif"
         tifffile.imwrite(str(fname), panel)

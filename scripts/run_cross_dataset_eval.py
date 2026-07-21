@@ -526,9 +526,114 @@ def _is_2ch_model(variant_dir: Path) -> bool:
     for entry in cfg.get("data", {}).get("patch_dirs", []):
         if "channel_dirs" in entry:
             return True
-    if cfg.get("model", {}).get("no_ch", 1) >= 2:
+    no_ch = int(cfg.get("model", {}).get("no_ch", 1))
+    if no_ch == 2:
         return True
     return False
+
+
+def _get_model_no_ch(variant_dir: Path) -> int:
+    """Return no_ch from model config (1 if not specified)."""
+    cfg = _read_model_config(variant_dir)
+    return int(cfg.get("model", {}).get("no_ch", 1))
+
+
+def _get_model_channels(variant_dir: Path) -> list[str] | None:
+    """Return channel name list from enlarged_crop.channel in config, or None."""
+    cfg = _read_model_config(variant_dir)
+    ch = cfg.get("enlarged_crop", {}).get("channel", None)
+    if ch is None:
+        return None
+    return [str(c) for c in (ch if isinstance(ch, list) else [ch])]
+
+
+# channel name → subdirectory suffix within ae_results/patches/cio_rb/{ds}{suffix}/{cond}/
+_CH_SUFFIX: dict[str, str] = {
+    "pax":  "",       # {ds}/cond  (standard paxillin)
+    "ppax": "",       # treated same as pax
+    "pfak": "",       # treated same as pax
+    "vinc": "_ch0",   # {ds}_ch0/cond
+    "zyx":  "_ch2",   # {ds}_ch2/cond
+    "act":  "_ch3",   # {ds}_ch3/cond
+}
+
+
+def _channel_patch_rel(ch_name: str, dataset: str, condition: str) -> str:
+    """Relative patch path for a named channel on a given dataset/condition."""
+    suffix = _CH_SUFFIX.get(ch_name, "")
+    return f"ae_results/patches/cio_rb/{dataset}{suffix}/{condition}/tiff_patches32_mr10"
+
+
+def _infer_dataset_nch(model, ch_dirs: list[Path], device: str,
+                       batch_size: int,
+                       input_divisor: float = 1.0) -> tuple[list, list]:
+    """Run N-channel model on stacked patches; return (raws, recons) as (C,H,W) arrays."""
+    for d in ch_dirs:
+        if not d.exists():
+            print(f"    [skip nch] channel dir not found: {d}")
+            return [], []
+    ds = MultiChannelPatchDataset([str(d) for d in ch_dirs],
+                                  condition=0, condition_name="")
+    if len(ds) == 0:
+        return [], []
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False,
+                        drop_last=False, num_workers=0)
+    cls_name = type(model).__name__
+    model_type = "contrastive" if "Contrastive" in cls_name else \
+                 "semisup"     if "SemiSup"     in cls_name else \
+                 "vae"         if "VAE"          in cls_name else "ae"
+    raws, recons = [], []
+    with torch.no_grad():
+        for batch in loader:
+            x = batch[0]
+            if input_divisor != 1.0:
+                x = x / input_divisor
+            x_dev = x.to(device)
+            if model_type == "vae":
+                x_hat, _, _, _ = model(x_dev)
+            elif model_type == "semisup":
+                x_hat, _, _ = model(x_dev)
+            else:
+                x_hat, _ = model(x_dev)
+            for raw_p, rec_p in zip(x.numpy(), x_hat.cpu().numpy()):
+                raws.append(raw_p.astype(np.float32))
+                recons.append(rec_p.astype(np.float32))
+    return raws, recons
+
+
+def _external_metrics_nch(model, dataset_name: str, condition_name: str,
+                           ch_names: list[str], root_folder: Path,
+                           device: str, batch_size: int,
+                           input_divisor: float = 1.0) -> pd.DataFrame | None:
+    """Run N-channel inference on an external dataset and return patch metrics."""
+    ch_dirs = [root_folder / _channel_patch_rel(ch, dataset_name, condition_name)
+               for ch in ch_names]
+    n_patches = len(list(ch_dirs[0].glob("*.tif"))) if ch_dirs[0].exists() else 0
+    print(f"    inference {len(ch_names)}ch on {dataset_name}/{condition_name} "
+          f"({n_patches} patches) [÷{input_divisor}] …", flush=True)
+    raws, recons = _infer_dataset_nch(model, ch_dirs, device, batch_size,
+                                      input_divisor=input_divisor)
+    if not raws:
+        return None
+    met_df = _metrics_from_arrays(raws, recons)
+    met_df["dataset"]        = dataset_name
+    met_df["condition_name"] = condition_name
+    met_df["split"]          = "test"
+    met_df["group"]          = dataset_name + "_" + condition_name
+    return met_df
+
+
+# External dataset list for N-channel models (no paths — those are built dynamically)
+EXTERNAL_DATASETS_BASE = [
+    ("vinc",   "control"),
+    ("vinc",   "ycomp"),
+    ("pfak",   "control"),
+    ("pfak",   "ycomp"),
+    ("ppax",   "control"),
+    ("ppax",   "ycomp"),
+    ("nih3t3", "control"),
+    ("nih3t3", "ycomp"),
+]
 
 
 def _load_hist_map_for_ds(hist_map_dir: Path | None, ds_name: str):
@@ -557,12 +662,16 @@ def _run_variant(variant: str, variant_dir: Path, run_dir: Path,
     input_divisor    = _read_input_divisor(variant_dir)
     ch3_model        = _is_ch3_model(variant_dir)
     training_datasets = _get_training_datasets(variant_dir)
-    # auto-detect 2ch models even when --two-channel flag was not passed
+    no_ch     = _get_model_no_ch(variant_dir)
+    ch_names  = _get_model_channels(variant_dir)
+    nch_model = no_ch > 2 and ch_names is not None
+    # auto-detect 2ch models (only when no_ch == 2)
     if not two_channel:
         two_channel = _is_2ch_model(variant_dir)
     ext_ds_list = EXTERNAL_DATASETS_CH3 if ch3_model else EXTERNAL_DATASETS
     print(f"  input_divisor: {input_divisor}  ch3_model: {ch3_model}"
-          f"  two_channel: {two_channel}  training_datasets: {sorted(training_datasets)}")
+          f"  no_ch: {no_ch}  nch_model: {nch_model}  two_channel: {two_channel}"
+          f"  ch_names: {ch_names}  training_datasets: {sorted(training_datasets)}")
     variant_rows = []
 
     # 1. Training data from existing recon TIFs (correctly labeled by actual dataset)
@@ -581,7 +690,20 @@ def _run_variant(variant: str, variant_dir: Path, run_dir: Path,
     model = torch.load(str(model_pt), map_location=device, weights_only=False)
     model.eval()
 
-    if two_channel:
+    if nch_model:
+        # N-channel model (3ch, 4ch, ...): build patch dirs dynamically from channel list
+        for ds_name, cond_name in EXTERNAL_DATASETS_BASE:
+            if ds_name in training_datasets:
+                print(f"    [skip] {ds_name}/{cond_name} — in training data")
+                continue
+            ext_df = _external_metrics_nch(model, ds_name, cond_name,
+                                            ch_names, root_folder,
+                                            device, batch_size,
+                                            input_divisor=input_divisor)
+            if ext_df is not None:
+                ext_df["variant"] = variant
+                variant_rows.append(ext_df)
+    elif two_channel:
         for ds_name, cond_name, ch1_rel, ch3_rel in EXTERNAL_DATASETS_2CH:
             if ds_name in training_datasets:
                 print(f"    [skip] {ds_name}/{cond_name} — in training data")
@@ -626,6 +748,44 @@ def _run_variant(variant: str, variant_dir: Path, run_dir: Path,
     return variant_df
 
 
+def _normalize_group(g: str) -> str:
+    """Convert old '_train'/'_val' suffix format to new 'tr:' prefix format."""
+    for suffix in ("_train", "_val"):
+        if g.endswith(suffix):
+            return "tr:" + g[:-len(suffix)]
+    return g
+
+
+def _replot_from_csv(run_dir: Path) -> None:
+    """Regenerate per-variant violin PNGs from the saved combined metrics CSV.
+
+    Normalises old group labels (ds_cond_train / ds_cond_val → tr:ds_cond)
+    so the updated _shorten() / _build_group_order() logic is applied cleanly.
+    """
+    csv_path = run_dir / "cross_dataset_recon_metrics.csv"
+    if not csv_path.exists():
+        sys.exit(f"CSV not found: {csv_path}")
+
+    df = pd.read_csv(csv_path)
+    if "group" not in df.columns or "variant" not in df.columns:
+        sys.exit("CSV missing 'group' or 'variant' columns")
+
+    # normalise group labels to the current tr: prefix convention
+    df["group"] = df["group"].apply(_normalize_group)
+
+    for variant, vdf in df.groupby("variant"):
+        variant_dir = run_dir / str(variant)
+        if not variant_dir.is_dir():
+            print(f"  [skip] {variant} — dir not found")
+            continue
+        for metric in METRICS:
+            if metric not in vdf.columns:
+                continue
+            save_path = variant_dir / f"cross_dataset_{metric}.png"
+            _violin_plot_single(vdf, str(variant), metric, save_path)
+    print("Replot done.")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", type=Path)
@@ -633,9 +793,11 @@ def main():
                         default="/net/projects/CLS/lding/data/fa_data_analysis")
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--mode", choices=["variants", "sweep"], default="variants",
+    parser.add_argument("--mode", choices=["variants", "sweep", "replot"],
+                        default="variants",
                         help="variants: iterate hard-coded VARIANTS subdirs; "
-                             "sweep: auto-discover all model dirs recursively")
+                             "sweep: auto-discover all model dirs recursively; "
+                             "replot: regenerate violin PNGs from saved CSV (no inference)")
     parser.add_argument("--hist-map-dir", type=Path, default=None,
                         help="Directory with {ds}_map.npz files.  When set, external "
                              "dataset metrics are computed in original intensity space: "
@@ -654,6 +816,11 @@ def main():
 
     if not run_dir.is_dir():
         sys.exit(f"Not a directory: {run_dir}")
+
+    if args.mode == "replot":
+        print(f"Replot mode — regenerating violin PNGs from {run_dir}")
+        _replot_from_csv(run_dir)
+        return
 
     print(f"Run dir    : {run_dir}")
     print(f"Mode       : {args.mode}")

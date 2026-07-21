@@ -1,0 +1,104 @@
+# =============================================================================
+# ConAE  |  sc2: input/2  |  L1  |  lambda_contrast=0.10
+# Training data: vinc×1 (40%tr ~11k) + balanced repeats
+# Results: ae_results/contrastive_run/ds_combo_enlcrop_sc2_lc010_bal_l1/nih3t3_ppax/
+# =============================================================================
+root_folder : "/net/projects/CLS/lding/data/fa_data_analysis"
+
+data:
+  patch_dirs:
+    # nih3t3 control (repeat 1/2)
+    - path           : root_folder + "/ae_results/patches/cio_rb/nih3t3/control/tiff_patches32_mr10"
+      frame_dir      : root_folder + "/ae_results/source_frames/cio_rb/nih3t3/control"
+      condition      : 0
+      condition_name : "nih3t3_control"
+    # nih3t3 ycomp (repeat 1/2)
+    - path           : root_folder + "/ae_results/patches/cio_rb/nih3t3/ycomp/tiff_patches32_mr10"
+      frame_dir      : root_folder + "/ae_results/source_frames/cio_rb/nih3t3/ycomp"
+      condition      : 1
+      condition_name : "nih3t3_ycomp"
+
+    # nih3t3 control (repeat 2/2)
+    - path           : root_folder + "/ae_results/patches/cio_rb/nih3t3/control/tiff_patches32_mr10"
+      frame_dir      : root_folder + "/ae_results/source_frames/cio_rb/nih3t3/control"
+      condition      : 0
+      condition_name : "nih3t3_control"
+    # nih3t3 ycomp (repeat 2/2)
+    - path           : root_folder + "/ae_results/patches/cio_rb/nih3t3/ycomp/tiff_patches32_mr10"
+      frame_dir      : root_folder + "/ae_results/source_frames/cio_rb/nih3t3/ycomp"
+      condition      : 1
+      condition_name : "nih3t3_ycomp"
+
+    # ppax control (repeat 1/2)
+    - path           : root_folder + "/ae_results/patches/cio_rb/ppax/control/tiff_patches32_mr10"
+      frame_dir      : root_folder + "/ae_results/source_frames/cio_rb/ppax/control"
+      condition      : 2
+      condition_name : "ppax_control"
+    # ppax ycomp (repeat 1/2)
+    - path           : root_folder + "/ae_results/patches/cio_rb/ppax/ycomp/tiff_patches32_mr10"
+      frame_dir      : root_folder + "/ae_results/source_frames/cio_rb/ppax/ycomp"
+      condition      : 3
+      condition_name : "ppax_ycomp"
+
+    # ppax control (repeat 2/2)
+    - path           : root_folder + "/ae_results/patches/cio_rb/ppax/control/tiff_patches32_mr10"
+      frame_dir      : root_folder + "/ae_results/source_frames/cio_rb/ppax/control"
+      condition      : 2
+      condition_name : "ppax_control"
+    # ppax ycomp (repeat 2/2)
+    - path           : root_folder + "/ae_results/patches/cio_rb/ppax/ycomp/tiff_patches32_mr10"
+      frame_dir      : root_folder + "/ae_results/source_frames/cio_rb/ppax/ycomp"
+      condition      : 3
+      condition_name : "ppax_ycomp"
+
+enlarged_crop:
+  enabled       : true
+  channel       : "pax"
+  context_size  : 58
+  max_shift_px  : 4
+  max_angle_deg : 15.0
+  pad_size      : 64
+  input_divisor : 2.0
+
+output:
+  result_dir : root_folder + "/ae_results/contrastive_run/ds_combo_enlcrop_sc2_lc010_bal_l1/nih3t3_ppax"
+
+model:
+  model_type      : "contrastive"
+  latent_dim      : 12
+  input_ps        : 32
+  no_ch           : 1
+  BN_flag         : false
+  dropout_flag    : false
+  output_sigmoid  : true
+  recon_loss_type : "l1"
+
+  proj_dim              : 8
+  noise_prob            : 0.05
+  temperature           : 0.5
+  lambda_recon          : 1.0
+  lambda_contrast       : 0.10
+  intensity_scale_range : [0.8, 1.2]
+
+training:
+  epochs                  : 500
+  lr                      : 0.001
+  batch_size              : 128
+  num_workers             : 6
+  val_split               : 0.2
+  loss_norm_flag          : false
+  group_split             : true
+  weight_decay            : 0.0001
+  warmup_epochs           : 0
+  lr_scheduler            : "cosine"
+  early_stopping_patience : 0
+  min_epochs_for_best     : 0
+
+reconstruction:
+  save_recon      : true
+  recon_pad_size  : 64
+  recon_image_size: 1024
+
+misc:
+  device    : "auto"
+  log_level : "INFO"

@@ -126,7 +126,7 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
     lambda_contrast       = float(_get("model", "lambda_contrast",       0.5))
     use_flip              = bool(_get("model",  "use_flip",              True))
     _isr                  = _get("model", "intensity_scale_range", [0.8, 1.2])
-    intensity_scale_range = tuple(float(v) for v in _isr)
+    intensity_scale_range = tuple(float(v) for v in _isr) if _isr is not None else None
 
     # ---- training ----
     epochs         = int(_get("training",   "epochs",         200))
@@ -146,6 +146,7 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
 
     # ---- reconstruction ----
     save_recon       = bool(_get("reconstruction", "save_recon",       True))
+    compact_recon    = bool(_get("reconstruction", "compact_recon",    False))
     recon_pad_size   = int(_get("reconstruction",  "recon_pad_size",   64))
     recon_image_size = int(_get("reconstruction",  "recon_image_size", 1024))
 
@@ -167,10 +168,17 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
     enlarged_crop_max_angle    = float(_get("enlarged_crop", "max_angle_deg",  15.0))
     enlarged_crop_pad_size     = int(_get("enlarged_crop",   "pad_size",       64))
     enlarged_crop_input_divisor = float(_get("enlarged_crop", "input_divisor", 1.0))
+    patch_input_divisor         = float(_get("training",      "patch_input_divisor", 1.0))
 
     output_sigmoid             = bool(_get("model",          "output_sigmoid",   True))
     recon_loss_type            = str(_get("model",           "recon_loss_type",  "mse"))
     lambda_hessian             = float(_get("model",         "lambda_hessian",    0.0))
+
+    # ---- log map ----
+    log_map_enabled = bool(_get("log_map",  "enabled",  False))
+    log_map_x_min   = float(_get("log_map", "x_min",   -0.03))
+    log_map_x_ref   = float(_get("log_map", "x_ref",   10.0))
+    log_map_delta   = float(_get("log_map", "delta",    0.5))
 
     # ---- misc ----
     device       = str(_get("misc", "device", "auto"))
@@ -215,6 +223,7 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
         lr_scheduler_factor=lr_scheduler_factor,
         lr_min=lr_min,
         save_recon=save_recon,
+        compact_recon=compact_recon,
         recon_pad_size=recon_pad_size,
         recon_image_size=recon_image_size,
         device=device,
@@ -242,9 +251,14 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
         enlarged_crop_max_angle=enlarged_crop_max_angle,
         enlarged_crop_pad_size=enlarged_crop_pad_size,
         enlarged_crop_input_divisor=enlarged_crop_input_divisor,
+        patch_input_divisor=patch_input_divisor,
         output_sigmoid=output_sigmoid,
         recon_loss_type=recon_loss_type,
         lambda_hessian=lambda_hessian,
+        log_map_enabled=log_map_enabled,
+        log_map_x_min=log_map_x_min,
+        log_map_x_ref=log_map_x_ref,
+        log_map_delta=log_map_delta,
     )
 
 
