@@ -75,10 +75,24 @@ def _label_color(label: str, color_map: dict) -> str:
     return color_map.get(str(label), FALLBACK)
 
 
+def _intensity_color(mean_intensity: float, show_blue: bool,
+                     show_yellow: bool, show_red: bool,
+                     fallback: str = FALLBACK) -> str:
+    """Return an intensity-based highlight colour, or fallback if no threshold matches."""
+    if show_red    and mean_intensity > 5: return "#FF4444"
+    if show_yellow and mean_intensity > 2: return "#FFCC00"
+    if show_blue   and mean_intensity < 0: return "#4488FF"
+    return fallback
+
+
 # ── HDF5 loading ──────────────────────────────────────────────────────────────
 
-def load_h5(path: str):
-    """Return (df, patches_raw, patches_recon, images_raw, img_meta, pad, scale, result_dir, plots)."""
+def _read_h5_model(path: str):
+    """Load model-side data from an interactive.h5 / model.h5.
+
+    Returns (df, patches_raw, patches_recon, images_raw, img_meta,
+             pad, scale, result_dir, plots).
+    """
     with h5py.File(path, 'r') as f:
         df            = pd.read_csv(io.StringIO(f['meta/csv'][()].decode()))
         patches_raw   = f['patches/raw'][()]   if 'patches/raw'   in f else None
@@ -92,6 +106,91 @@ def load_h5(path: str):
         plots = {key: bytes(f[f'plots/{key}'][()])
                  for key in f.get('plots', {}).keys()}
     return df, patches_raw, patches_recon, images_raw, img_meta, pad_size, image_scale, result_dir, plots
+
+
+def _read_h5_data(path: str):
+    """Load dataset-side data from a data.h5 (patches + images, no model outputs).
+
+    Returns (df_data, patches_raw, images_raw, img_meta, pad, scale).
+    """
+    with h5py.File(path, 'r') as f:
+        df_data     = pd.read_csv(io.StringIO(f['meta/csv'][()].decode()))
+        patches_raw = f['patches/raw'][()] if 'patches/raw' in f else None
+        images_raw  = f['images/raw'][()]  if 'images/raw'  in f else None
+        img_meta    = (pd.read_csv(io.StringIO(f['images/meta'][()].decode()))
+                       if 'images/meta' in f else None)
+        pad_size    = float(f.attrs.get('pad_size', 64))
+        image_scale = float(f.attrs.get('image_scale', 1.0))
+    return df_data, patches_raw, images_raw, img_meta, pad_size, image_scale
+
+
+def load_sources(data_h5: str | None, model_h5: str | None):
+    """Load from data.h5 + model H5, or from a single legacy interactive.h5.
+
+    Two-file mode  (data_h5 AND model_h5 provided):
+      • images + raw patches come from data_h5
+      • latents / UMAP / predictions / recon come from model_h5
+      • static columns (mean_intensity, annotation_label) merged from data_h5
+
+    Single-file mode (only model_h5 provided):
+      • backward-compatible: reads everything from one interactive.h5
+
+    Returns the same 9-tuple as the old load_h5().
+    """
+    if data_h5 and model_h5:
+        print(f'[view] data  : {data_h5}')
+        print(f'[view] model : {model_h5}')
+        df_model, pr_model, patches_recon, im_model, imm_model, pad_m, scale_m, result_dir, plots = \
+            _read_h5_model(model_h5)
+        df_data, pr_data, im_data, imm_data, pad_d, scale_d = \
+            _read_h5_data(data_h5)
+
+        # Prefer data.h5 for images (higher quality / all conditions)
+        images_raw = im_data   if im_data   is not None else im_model
+        img_meta   = imm_data  if imm_data  is not None else imm_model
+        pad_size   = pad_d
+        image_scale = scale_d
+
+        # Merge static columns from data.h5 into model df (join on filename)
+        static_cols = [c for c in ('filename', 'mean_intensity',
+                                   'annotation_label', 'annotation_label_name',
+                                   'canvas_cx', 'canvas_cy', 'ps')
+                       if c in df_data.columns]
+        # drop cols already in df_model to avoid duplicate suffixes
+        drop_from_data = [c for c in static_cols if c != 'filename' and c in df_model.columns]
+        df = df_model.merge(df_data[static_cols].drop(columns=drop_from_data),
+                            on='filename', how='left')
+
+        # Reindex patches_raw from data.h5 to match model df row order
+        if pr_data is not None:
+            fname_to_idx = {str(fn): i for i, fn in enumerate(df_data['filename'])}
+            h, w = pr_data.shape[1], pr_data.shape[2]
+            patches_raw = np.zeros((len(df), h, w), dtype=pr_data.dtype)
+            for i, fn in enumerate(df['filename']):
+                j = fname_to_idx.get(str(fn))
+                if j is not None:
+                    patches_raw[i] = pr_data[j]
+        else:
+            patches_raw = pr_model
+
+        return df, patches_raw, patches_recon, images_raw, img_meta, pad_size, image_scale, result_dir, plots
+
+    elif model_h5:
+        print(f'[view] Loading (single-file) {model_h5}')
+        return _read_h5_model(model_h5)
+
+    elif data_h5:
+        print(f'[view] Loading (data-only) {data_h5}')
+        df_data, patches_raw, images_raw, img_meta, pad_size, image_scale = _read_h5_data(data_h5)
+        return df_data, patches_raw, None, images_raw, img_meta, pad_size, image_scale, Path(''), {}
+
+    else:
+        raise ValueError('At least one H5 path is required.')
+
+
+# kept for backward compat (external callers)
+def load_h5(path: str):
+    return load_sources(None, path)
 
 
 # ── Image helpers ─────────────────────────────────────────────────────────────
@@ -177,10 +276,11 @@ def _legend_html() -> str:
 
 # ── Main app ──────────────────────────────────────────────────────────────────
 
-def build_app(h5_path: str) -> pn.viewable.Viewable:
-    print(f'[view] Loading {h5_path} ...')
+def build_app(data_h5: str | None = None,
+              model_h5: str | None = None) -> pn.viewable.Viewable:
     (df, patches_raw, patches_recon,
-     images_raw, img_meta, pad_size, image_scale, result_dir, plots) = load_h5(h5_path)
+     images_raw, img_meta, pad_size, image_scale, result_dir, plots) = \
+        load_sources(data_h5, model_h5)
     n = len(df)
     print(f'[view]   {n} patches, image_scale={image_scale}')
 
@@ -199,11 +299,13 @@ def build_app(h5_path: str) -> pn.viewable.Viewable:
     if has_old_images:
         print(f'[view]   Old-format images: {len(old_img_files)} files')
 
-    # Derive model/variant name from result_dir (…/variant/dataset) or h5 path
+    # Derive model/variant name from result_dir or model_h5 path
     if result_dir != Path('') and result_dir.parent.name:
         model_name = result_dir.parent.name
+    elif model_h5:
+        model_name = Path(model_h5).stem
     else:
-        model_name = Path(h5_path).parent.parent.name
+        model_name = 'data-only'
     print(f'[view]   Model: {model_name}')
 
     # Disk fallback for MSE plots not packed into H5
@@ -216,115 +318,161 @@ def build_app(h5_path: str) -> pn.viewable.Viewable:
                     plots[pname] = p.read_bytes()
                     print(f'[view]   Loaded plot from disk: {pname}.png')
 
-    # Fall back to latent dims if UMAP not available
-    if 'UMAP_1' not in df.columns:
-        z_cols = [c for c in df.columns if c.startswith('z_')]
-        if len(z_cols) >= 2:
+    # Detect data-only mode: no latents and no UMAP
+    z_cols   = [c for c in df.columns if c.startswith('z_')]
+    has_umap = 'UMAP_1' in df.columns or 'UMAP_2' in df.columns
+    data_only = not has_umap and not z_cols
+    print(f'[view]   data_only={data_only}')
+
+    # Fall back to latent dims if UMAP not available (model mode only)
+    if not data_only:
+        if not has_umap:
             df['UMAP_1'], df['UMAP_2'] = df[z_cols[0]], df[z_cols[1]]
             print(f'[view]   No UMAP -- showing {z_cols[0]} vs {z_cols[1]}')
-        else:
-            df['UMAP_1'] = df['UMAP_2'] = 0.0
 
     fa_pred  = df.get('fa_pred',  pd.Series([''] * n)).fillna('').astype(str)
     pos_pred = df.get('pos_pred', pd.Series([''] * n)).fillna('').astype(str)
 
-    # ── UMAP ColumnDataSource ─────────────────────────────────────────────────
-    umap_data: dict = dict(
-        x         = df['UMAP_1'].fillna(0).values,
-        y         = df['UMAP_2'].fillna(0).values,
-        idx       = np.arange(n, dtype=int),
-        condition = (df.get('condition_name', df.get('condition', pd.Series([''] * n)))
-                     .fillna('').astype(str).values),
-        fa_pred   = fa_pred.values,
-        pos_pred  = pos_pred.values,
-        filename  = df['filename'].astype(str).values,
-        color_fa  = [_label_color(v, FA_COLOR_MAP)  for v in fa_pred],
-        color_pos = [_label_color(v, POS_COLOR_MAP) for v in pos_pred],
-    )
-    umap_data['color'] = list(umap_data['color_fa'])
-    has_b64 = 'raw_b64' in df.columns
-    if has_b64:
-        umap_data['raw_b64']   = df['raw_b64'].values
-        umap_data['recon_b64'] = df['recon_b64'].values
+    # ── Data-only left panel: mean_intensity histogram ────────────────────────
+    if data_only:
+        mean_int = df['mean_intensity'].values.astype(float) \
+                   if 'mean_intensity' in df.columns else np.zeros(n)
+        cond_col = 'condition_name' if 'condition_name' in df.columns else 'condition'
+        conds    = df[cond_col].fillna('').unique() if cond_col in df.columns else []
 
-    umap_src = ColumnDataSource(umap_data)
-
-    # Single big red dot on UMAP -- updated when user clicks the image panel
-    highlight_src = ColumnDataSource({'x': [], 'y': []})
-
-    # ── UMAP scatter figure ───────────────────────────────────────────────────
-    p_umap = figure(
-        width=520, height=500,
-        title='UMAP  (hover = patch tooltip  |  tap = detail panel)',
-        tools='pan,wheel_zoom,box_zoom,reset,tap',
-        toolbar_location='above',
-    )
-
-    scatter = p_umap.scatter(
-        'x', 'y', source=umap_src, marker='circle',
-        fill_color='color', line_color='color',
-        size=5, alpha=0.65,
-        nonselection_fill_color='color', nonselection_fill_alpha=0.15,
-        nonselection_line_alpha=0.0,
-        selection_fill_color='color', selection_line_color='white',
-        selection_line_width=1.5,
-    )
-
-    # Highlighted point (from image click) -- drawn on top as a large red dot
-    p_umap.scatter(
-        'x', 'y', source=highlight_src, marker='circle',
-        fill_color='red', line_color='white',
-        size=18, alpha=1.0, line_width=2.5,
-    )
-
-    # Hover tooltip with embedded patch images (client-side, instant)
-    if has_b64:
-        hover_html = """
-            <div style="background:#111;padding:6px 8px;border-radius:6px;max-width:310px;">
-              <div style="display:flex;gap:6px;">
-                <div style="text-align:center;">
-                  <img src="data:image/png;base64,@raw_b64"
-                       style="width:128px;height:128px;image-rendering:pixelated;display:block;"/>
-                  <span style="color:#aaa;font-size:10px;">Raw</span>
-                </div>
-                <div style="text-align:center;">
-                  <img src="data:image/png;base64,@recon_b64"
-                       style="width:128px;height:128px;image-rendering:pixelated;display:block;"/>
-                  <span style="color:#aaa;font-size:10px;">Recon</span>
-                </div>
-              </div>
-              <div style="color:#ccc;font-size:10px;margin-top:5px;line-height:1.4;">
-                @filename<br>cond: @condition<br>FA: @fa_pred<br>Pos: @pos_pred
-              </div>
-            </div>"""
-        p_umap.add_tools(HoverTool(renderers=[scatter], tooltips=hover_html))
+        fig_hist, ax = plt.subplots(figsize=(5.2, 5.0))
+        ax.hist(mean_int, bins=100, color='#888888', alpha=0.75, density=True)
+        ax.axvline(0, color='#4488FF', lw=1.6, ls='--', label='< 0')
+        ax.axvline(2, color='#FFCC00', lw=1.6, ls='--', label='> 2')
+        ax.axvline(5, color='#FF4444', lw=1.6, ls='--', label='> 5')
+        ax.set_xlabel('mean_intensity (CIO, scale=5)')
+        ax.set_ylabel('density')
+        n_blue   = int((mean_int < 0).sum())
+        n_yellow = int((mean_int > 2).sum())
+        n_red    = int((mean_int > 5).sum())
+        ax.set_title(
+            f'All patches  N={n}\n'
+            f'<0: {n_blue}  >2: {n_yellow}  >5: {n_red}',
+            fontsize=10,
+        )
+        ax.legend(fontsize=9)
+        fig_hist.tight_layout()
+        left_col = pn.Column(
+            pn.pane.HTML(
+                f'<div style="font-size:11px;line-height:1.9;">'
+                f'<b>Dataset:</b> {data_h5 or ""}<br>'
+                f'<b>Patches:</b> {n}<br>'
+                f'<b>Conditions:</b> {", ".join(str(c) for c in conds)}</div>',
+                width=480,
+            ),
+            _fig_to_pane(fig_hist, dpi=120),
+            width=490,
+        )
+        highlight_src = ColumnDataSource({'x': [], 'y': []})  # unused but ref'd later
     else:
-        p_umap.add_tools(HoverTool(renderers=[scatter], tooltips=[
-            ('file', '@filename'), ('cond', '@condition'),
-            ('FA',   '@fa_pred'),  ('Pos',  '@pos_pred'),
-        ]))
+        # ── UMAP ColumnDataSource ─────────────────────────────────────────────
+        umap_data: dict = dict(
+            x         = df['UMAP_1'].fillna(0).values,
+            y         = df['UMAP_2'].fillna(0).values,
+            idx       = np.arange(n, dtype=int),
+            condition = (df.get('condition_name', df.get('condition', pd.Series([''] * n)))
+                         .fillna('').astype(str).values),
+            fa_pred   = fa_pred.values,
+            pos_pred  = pos_pred.values,
+            filename  = df['filename'].astype(str).values,
+            color_fa  = [_label_color(v, FA_COLOR_MAP)  for v in fa_pred],
+            color_pos = [_label_color(v, POS_COLOR_MAP) for v in pos_pred],
+        )
+        umap_data['color'] = list(umap_data['color_fa'])
+        has_b64 = 'raw_b64' in df.columns
+        if has_b64:
+            umap_data['raw_b64']   = df['raw_b64'].values
+            umap_data['recon_b64'] = df['recon_b64'].values
 
-    p_umap.xaxis.axis_label = 'UMAP 1'
-    p_umap.yaxis.axis_label = 'UMAP 2'
+        umap_src = ColumnDataSource(umap_data)
 
-    # Colour-by selector (pure JS -- no server round-trip)
-    color_select = Select(
-        title='Colour by', value='fa_pred',
-        options=[('fa_pred', 'FA type'), ('pos_pred', 'Position')],
-        width=180,
-    )
-    color_select.js_on_change('value', CustomJS(
-        args=dict(src=umap_src, plot=p_umap), code="""
-        const d = src.data;
-        d['color'] = (cb_obj.value === 'fa_pred')
-            ? [...d['color_fa']] : [...d['color_pos']];
-        src.change.emit();
-        const lbl = (cb_obj.value === 'fa_pred') ? 'FA type' : 'Position';
-        plot.title.text = 'UMAP  -- ' + lbl
-            + '  (hover = patch tooltip  |  tap = detail panel)';
-    """))
+        # Single big red dot on UMAP -- updated when user clicks the image panel
+        highlight_src = ColumnDataSource({'x': [], 'y': []})
 
-    left_col = pn.pane.Bokeh(bk_column(color_select, p_umap))
+        # ── UMAP scatter figure ───────────────────────────────────────────────
+        p_umap = figure(
+            width=520, height=500,
+            title='UMAP  (hover = patch tooltip  |  tap = detail panel)',
+            tools='pan,wheel_zoom,box_zoom,reset,tap',
+            toolbar_location='above',
+        )
+
+        scatter = p_umap.scatter(
+            'x', 'y', source=umap_src, marker='circle',
+            fill_color='color', line_color='color',
+            size=5, alpha=0.65,
+            nonselection_fill_color='color', nonselection_fill_alpha=0.15,
+            nonselection_line_alpha=0.0,
+            selection_fill_color='color', selection_line_color='white',
+            selection_line_width=1.5,
+        )
+
+        # Highlighted point (from image click) -- drawn on top as a large red dot
+        p_umap.scatter(
+            'x', 'y', source=highlight_src, marker='circle',
+            fill_color='red', line_color='white',
+            size=18, alpha=1.0, line_width=2.5,
+        )
+
+        # Hover tooltip with embedded patch images (client-side, instant)
+        if has_b64:
+            hover_html = """
+                <div style="background:#111;padding:6px 8px;border-radius:6px;max-width:310px;">
+                  <div style="display:flex;gap:6px;">
+                    <div style="text-align:center;">
+                      <img src="data:image/png;base64,@raw_b64"
+                           style="width:128px;height:128px;image-rendering:pixelated;display:block;"/>
+                      <span style="color:#aaa;font-size:10px;">Raw</span>
+                    </div>
+                    <div style="text-align:center;">
+                      <img src="data:image/png;base64,@recon_b64"
+                           style="width:128px;height:128px;image-rendering:pixelated;display:block;"/>
+                      <span style="color:#aaa;font-size:10px;">Recon</span>
+                    </div>
+                  </div>
+                  <div style="color:#ccc;font-size:10px;margin-top:5px;line-height:1.4;">
+                    @filename<br>cond: @condition<br>FA: @fa_pred<br>Pos: @pos_pred
+                  </div>
+                </div>"""
+            p_umap.add_tools(HoverTool(renderers=[scatter], tooltips=hover_html))
+        else:
+            p_umap.add_tools(HoverTool(renderers=[scatter], tooltips=[
+                ('file', '@filename'), ('cond', '@condition'),
+                ('FA',   '@fa_pred'),  ('Pos',  '@pos_pred'),
+            ]))
+
+        p_umap.xaxis.axis_label = 'UMAP 1'
+        p_umap.yaxis.axis_label = 'UMAP 2'
+
+        # Colour-by selector (pure JS -- no server round-trip)
+        color_select = Select(
+            title='Colour by', value='fa_pred',
+            options=[('fa_pred', 'FA type'), ('pos_pred', 'Position')],
+            width=180,
+        )
+        color_select.js_on_change('value', CustomJS(
+            args=dict(src=umap_src, plot=p_umap), code="""
+            const d = src.data;
+            d['color'] = (cb_obj.value === 'fa_pred')
+                ? [...d['color_fa']] : [...d['color_pos']];
+            src.change.emit();
+            const lbl = (cb_obj.value === 'fa_pred') ? 'FA type' : 'Position';
+            plot.title.text = 'UMAP  -- ' + lbl
+                + '  (hover = patch tooltip  |  tap = detail panel)';
+        """))
+
+        left_col = pn.pane.Bokeh(bk_column(color_select, p_umap))
+    # end if/else data_only
+
+    # ── Outlier highlight checkboxes (shared with canvas) ─────────────────────
+    ck_blue   = pn.widgets.Checkbox(name="< 0  (blue)",   value=False)
+    ck_yellow = pn.widgets.Checkbox(name="> 2  (yellow)", value=False)
+    ck_red    = pn.widgets.Checkbox(name="> 5  (red)",    value=False)
 
     # ── Full image Bokeh figure (Direction B) ─────────────────────────────────
     has_images = (images_raw is not None and img_meta is not None) or has_old_images
@@ -408,6 +556,8 @@ def build_app(h5_path: str) -> pn.viewable.Viewable:
             mask = df[pg_col].astype(str) == group_key
             sub  = df[mask]
             xs, ys, ws, hs, cols, idxs = [], [], [], [], [], []
+            sb, sy, sr = ck_blue.value, ck_yellow.value, ck_red.value
+            any_ck = sb or sy or sr
             for i, row in sub.iterrows():
                 cx = row.get('canvas_cx', np.nan)
                 cy = row.get('canvas_cy', np.nan)
@@ -419,10 +569,17 @@ def build_app(h5_path: str) -> pn.viewable.Viewable:
                 ys.append((img_H - float(cy)) * image_scale)
                 ws.append(float(ps) * image_scale)
                 hs.append(float(ps) * image_scale)
-                cols.append(_label_color(
-                    str(row.get('fa_pred', '')), FA_COLOR_MAP))
+                fa_col = _label_color(str(row.get('fa_pred', '')), FA_COLOR_MAP)
+                if any_ck:
+                    mi = float(row.get('mean_intensity', 0.0) or 0.0)
+                    cols.append(_intensity_color(mi, sb, sy, sr, fallback=fa_col))
+                else:
+                    cols.append(fa_col)
                 idxs.append(i)
             return dict(x=xs, y=ys, width=ws, height=hs, color=cols, df_idx=idxs)
+
+        def _refresh_colors() -> None:
+            rects_src.data = _rects_for_group(_state['group'], _state['H'])
 
         _state.update(group=init_group, H=H, W=W)
         rects_src.data = _rects_for_group(init_group, H)
@@ -447,6 +604,10 @@ def build_app(h5_path: str) -> pn.viewable.Viewable:
         )
         img_select_widget.param.watch(lambda e: _load_group(e.new), 'value')
         img_pane = pn.pane.Bokeh(img_fig)
+
+        ck_blue.param.watch(lambda _: _refresh_colors(), 'value')
+        ck_yellow.param.watch(lambda _: _refresh_colors(), 'value')
+        ck_red.param.watch(lambda _: _refresh_colors(), 'value')
 
     # ── Shared detail panel (bottom bar) ──────────────────────────────────────
     pred_md   = pn.pane.HTML(
@@ -528,7 +689,8 @@ def build_app(h5_path: str) -> pn.viewable.Viewable:
                 _load_group(pg_val)
                 img_select_widget.value = pg_val
 
-    umap_src.selected.on_change('indices', _on_umap_tap)
+    if not data_only:
+        umap_src.selected.on_change('indices', _on_umap_tap)
 
     # ── Direction B: image click → UMAP highlight + detail ───────────────────
     if has_images:
@@ -554,11 +716,12 @@ def build_app(h5_path: str) -> pn.viewable.Viewable:
             near_i  = int(np.argmin(dists))
             near_df = int(df_idx[near_i])
 
-            # Big red dot on UMAP
-            row    = df.iloc[near_df]
-            umap_x = float(row.get('UMAP_1', row.get('umap_1', 0)) or 0)
-            umap_y = float(row.get('UMAP_2', row.get('umap_2', 0)) or 0)
-            highlight_src.data = dict(x=[umap_x], y=[umap_y])
+            # Big red dot on UMAP (model mode only)
+            if not data_only:
+                row    = df.iloc[near_df]
+                umap_x = float(row.get('UMAP_1', row.get('umap_1', 0)) or 0)
+                umap_y = float(row.get('UMAP_2', row.get('umap_2', 0)) or 0)
+                highlight_src.data = dict(x=[umap_x], y=[umap_y])
 
             # White-border highlight on canvas
             sel_src.data = dict(
@@ -616,7 +779,11 @@ def build_app(h5_path: str) -> pn.viewable.Viewable:
     )
 
     if has_images:
-        canvas_col = pn.Column(img_select_widget, img_pane, width=540)
+        outlier_row = pn.Row(
+            pn.pane.HTML('<b style="font-size:11px;">Highlight:</b>', width=65),
+            ck_blue, ck_yellow, ck_red,
+        )
+        canvas_col = pn.Column(img_select_widget, outlier_row, img_pane, width=540)
     else:
         canvas_col = pn.pane.Markdown(
             '*Full image data not in this HDF5.*\n\n'
@@ -624,11 +791,13 @@ def build_app(h5_path: str) -> pn.viewable.Viewable:
             width=540,
         )
 
+    src_label = (Path(model_h5).name if model_h5 else '') + \
+                (' + ' + Path(data_h5).name if data_h5 else '')
     return pn.Column(
         pn.pane.HTML(
             f'<h2>Interactive Patch Viewer &nbsp;·&nbsp; '
-            f'<a href="file://{Path(h5_path).resolve()}" target="_blank">{Path(h5_path).name}</a>'
-            f' &nbsp;·&nbsp; <code>{model_name}</code> trained from 0311 pax data</h2>',
+            f'<code>{src_label}</code>'
+            f' &nbsp;·&nbsp; <code>{model_name}</code></h2>',
             sizing_mode='stretch_width',
         ),
         pn.Row(left_col, pn.Spacer(width=12), canvas_col,
@@ -636,25 +805,88 @@ def build_app(h5_path: str) -> pn.viewable.Viewable:
     )
 
 
+def _get_cli_paths() -> tuple[str | None, str | None]:
+    """Return (data_h5, model_h5) from CLI/session args.
+
+    Accepted forms:
+      --args data.h5 model.h5   → two-file mode
+      --args model.h5           → single-file legacy mode
+      (no args)                 → show loader UI
+    """
+    def _decode(a):
+        return a.decode() if isinstance(a, bytes) else str(a)
+
+    sess  = pn.state.session_args
+    raw   = sess.get('args', []) or []
+    parts = [_decode(a) for a in raw] if raw else sys.argv[1:]
+
+    if len(parts) >= 2:
+        return parts[0], parts[1]
+    if len(parts) == 1:
+        return None, parts[0]
+    return None, None
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def _get_h5_path() -> str:
-    sess = pn.state.session_args
-    if 'args' in sess and sess['args']:
-        arg = sess['args'][0]
-        return arg.decode() if isinstance(arg, bytes) else str(arg)
-    if len(sys.argv) > 1:
-        return sys.argv[1]
-    print('Usage: python scripts/view_interactive.py path/to/interactive.h5',
-          file=sys.stderr)
-    sys.exit(1)
+def build_loader_app() -> pn.viewable.Viewable:
+    """Landing page with two file-path inputs + Load button; replaces itself on load."""
+    data_input = pn.widgets.TextInput(
+        name='1. Dataset H5  (data.h5 — patches + images)',
+        placeholder='/path/to/ae_results/patches/cio/{ds}/data.h5',
+        width=680,
+    )
+    model_input = pn.widgets.TextInput(
+        name='2. Model H5  (interactive.h5 / model.h5 — latents, UMAP, predictions)',
+        placeholder='/path/to/ae_results/…/interactive.h5',
+        width=680,
+    )
+    load_btn  = pn.widgets.Button(name='Load', button_type='primary', width=100)
+    status_md = pn.pane.Markdown('', width=800)
+    container = pn.Column(
+        pn.pane.HTML('<h2>Interactive Patch Viewer</h2>', sizing_mode='stretch_width'),
+        pn.pane.HTML(
+            '<p style="color:#888;">Provide both paths for two-file mode, '
+            'or only the Model H5 for legacy single-file mode.</p>',
+            sizing_mode='stretch_width',
+        ),
+        data_input,
+        model_input,
+        pn.Row(load_btn, status_md),
+    )
+
+    def _on_load(_):
+        dp = data_input.value.strip() or None
+        mp = model_input.value.strip() or None
+        if not dp and not mp:
+            status_md.object = '*Enter at least one H5 path.*'
+            return
+        for label, p in [('Dataset H5', dp), ('Model H5', mp)]:
+            if p and not Path(p).exists():
+                status_md.object = f'*{label} not found: `{p}`*'
+                return
+        status_md.object = 'Loading …'
+        try:
+            app = build_app(data_h5=dp, model_h5=mp)
+            container.objects = [app]
+        except Exception as exc:
+            status_md.object = f'**Error:** `{exc}`'
+
+    load_btn.on_click(_on_load)
+    return container
 
 
 if pn.state.served:
-    build_app(_get_h5_path()).servable()
+    _data_h5, _model_h5 = _get_cli_paths()
+    if _data_h5 or _model_h5:
+        build_app(data_h5=_data_h5, model_h5=_model_h5).servable()
+    else:
+        build_loader_app().servable()
 
 if __name__ == '__main__':
-    h5_path = _get_h5_path()
-    # Serve as a single app at '/' so the browser opens the correct URL.
-    # (Using a named dict routes to '/Name%20With%20Space' which gives 404.)
-    pn.serve(build_app(h5_path), show=True, port=5006, autoreload=False)
+    _data_h5, _model_h5 = _get_cli_paths()
+    if _data_h5 or _model_h5:
+        pn.serve(build_app(data_h5=_data_h5, model_h5=_model_h5),
+                 show=True, port=5006, autoreload=False)
+    else:
+        pn.serve(build_loader_app(), show=True, port=5006, autoreload=False)
