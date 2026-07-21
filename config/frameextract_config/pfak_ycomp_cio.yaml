@@ -1,0 +1,47 @@
+# Dataset   : pfak
+# Condition : ycomp
+# Norm      : CIO only (no rolling ball, scale=1)
+# ch0=pfak, ch1=paxillin, ch2=zyxin, ch3=actin
+root_folder : "/net/projects/CLS/lding/data/fa_data_analysis"
+
+paths:
+  image_folder     : root_folder + "/fa_data/other_paxillin/20250720_eGFP-Zyxin 488, Phalloidin 405, pFAK (rb) 647, paxillin(m)568/072025/Ycomp"
+  cell_mask_folder : null
+  output_dir       : root_folder + "/ae_results/source_frames/cio/pfak/ycomp"
+
+experiment:
+  condition : "ycomp"
+
+input:
+  file_type : "czi"
+  start_ind : 0
+  end_ind   : 999
+
+channels:
+  - index : 0
+    name  : "pfak"
+    scale : 1.0
+  - index : 1
+    name  : "pax"
+    scale : 1.0
+  - index : 2
+    name  : "zyx"
+    scale : 1.0
+  - index : 3
+    name  : "act"
+    scale : 1.0
+
+preprocessing:
+  rolling_ball_radius : null
+
+segmentation:
+  seg_ch                  : 1
+  seg_threshold           : 0.1
+  seg_close_size          : 11
+  seg_min_size_initial    : 3
+  seg_min_size_post_close : 10
+  seg_min_size_final      : 30000
+
+misc:
+  debug     : false
+  log_level : "INFO"

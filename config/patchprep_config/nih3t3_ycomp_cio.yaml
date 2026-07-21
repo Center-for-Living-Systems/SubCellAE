@@ -1,13 +1,12 @@
-# Dataset   : nih3t3 (20260227 – NIH3T3, Vinc/rb647 + pax/m555)  [truly new, different cell line]
+# Dataset   : nih3t3 (20260227 – NIH3T3, Vinc/rb647 + pax/m555)
 # Condition : ycomp
-# Norm      : cell_insideoutside  (no rolling ball)
-# Seg       : on-the-fly (default); see commented cell_mask_folder for pre-computed option
+# Norm      : cell_insideoutside (no rolling ball)
 paths:
-  root_folder      : "/home/lding/lding/fa_data_analysis"
+  root_folder      : "/net/projects/CLS/lding/data/fa_data_analysis"
   image_folder     : root_folder + "/fa_data/other_paxillin/20260227_NIH3T3_ZyxinGFP,Phalloidin405,Vinc_rb647,Pax_m555_reduced_size_AH/YCompound"
-  cell_mask_folder : null   # on-the-fly segmentation (default)
-  patch_output_dir : root_folder + "/ae_results/patches/cio/nih3t3/ycomp/tiff_patches32"
-  plot_output_dir  : root_folder + "/ae_results/patches/cio/nih3t3/ycomp/plot_patches32"
+  cell_mask_folder : null
+  patch_output_dir : root_folder + "/ae_results/patches/cio/nih3t3/ycomp/tiff_patches32_mr10"
+  plot_output_dir  : root_folder + "/ae_results/patches/cio/nih3t3/ycomp/plot_patches32_mr10"
 
 experiment:
   condition : "ycomp"
@@ -20,12 +19,12 @@ input:
 
 patch:
   patch_size   : 32
-  mask_ratio   : 0.4
+  mask_ratio   : 0.1
   pad_size     : 64
   patch_prefix : "ycomp"
 
 preprocessing:
-  rolling_ball_radius : null   # disabled
+  rolling_ball_radius : null
 
 normalization:
   norm_mode : "cell_insideoutside"
