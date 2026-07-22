@@ -17,6 +17,9 @@ dependencies:
   - scikit-learn
   - scikit-image
   - tifffile
+  - h5py
+  - panel
+  - bokeh
   - jupyterlab
   - pip
   - pip:
