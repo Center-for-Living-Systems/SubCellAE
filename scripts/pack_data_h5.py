@@ -46,7 +46,8 @@ import numpy as np
 import pandas as pd
 import tifffile
 
-DATA_ROOT = Path("/net/projects/CLS/lding/data/fa_data_analysis")
+DATA_ROOT          = Path("/net/projects/CLS/lding/data/fa_data_analysis")
+IMAGE_SERVICE_ROOT = Path("/mnt/p/image_service/data/FA_patch_data")
 PATCH_SUBDIR = "tiff_patches32_mr10"
 PAD_SIZE     = 64   # patchprep pad_size for mr10 configs
 
@@ -228,6 +229,18 @@ def pack_dataset(ds: str, conditions: list[str], norm: str = "cio") -> Path | No
 
     size_mb = out_path.stat().st_size / 1e6
     print(f"  → {out_path}  ({size_mb:.1f} MB)", flush=True)
+
+    # Copy to image_service NAS if mounted
+    svc_dir = IMAGE_SERVICE_ROOT / norm / ds
+    if IMAGE_SERVICE_ROOT.exists():
+        import shutil
+        svc_dir.mkdir(parents=True, exist_ok=True)
+        svc_path = svc_dir / "data.h5"
+        shutil.copy2(str(out_path), str(svc_path))
+        print(f"  → {svc_path}  (image_service copy)", flush=True)
+    else:
+        print(f"  [skip] image_service not mounted ({IMAGE_SERVICE_ROOT})", flush=True)
+
     return out_path
 
 
