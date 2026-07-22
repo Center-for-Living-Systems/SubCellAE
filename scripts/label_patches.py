@@ -38,6 +38,21 @@ from subcellae.utils.label_colors import (
 
 pn.extension(sizing_mode='stretch_width')
 
+# ── Label CSV output directory ────────────────────────────────────────────────
+_LABEL_CSV_ROOT = Path('/mnt/service/image_service/FA_label_csv')
+_KNOWN_DATASETS = ['vinc', 'ppax', 'pfak', 'nih3t3']
+
+def _label_csv_dir(h5_path: str) -> Path:
+    """Return /mnt/service/image_service/FA_label_csv/{dataset}/ derived from h5_path."""
+    parts = Path(h5_path).parts
+    for ds in _KNOWN_DATASETS:
+        if ds in parts:
+            return _LABEL_CSV_ROOT / ds
+    # fallback: use stem prefix if no known dataset found in path
+    stem = Path(h5_path).stem
+    ds = next((ds for ds in _KNOWN_DATASETS if stem.startswith(ds)), 'unknown')
+    return _LABEL_CSV_ROOT / ds
+
 # Labels available in this tool
 LABEL_OPTIONS = [
     "Nascent Adhesion",
@@ -509,7 +524,7 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
         annotator = name_input.value.strip().replace(' ', '_') or 'unknown'
         stamp = datetime.now().strftime('%Y%m%d_%H%M')
         h5_stem = Path(h5_path).stem
-        out = Path(h5_path).parent / f'{h5_stem}_{annotator}_{stamp}.csv'
+        out = _label_csv_dir(h5_path) / f'{h5_stem}_{annotator}_{stamp}.csv'
         out.parent.mkdir(parents=True, exist_ok=True)
         rows = [{'filename': fn, 'label': lbl, 'annotator': annotator}
                 for fn, lbl in labels.items()]
@@ -522,13 +537,13 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
     finish_btn.on_click(_on_finish)
 
     # ── Resume from previous CSV ──────────────────────────────────────────────
-    _h5_dir = Path(h5_path).parent
     _h5_stem = Path(h5_path).stem
-    _prev_csvs = sorted(_h5_dir.glob(f'{_h5_stem}_*.csv'))
+    _csv_out_dir = _label_csv_dir(h5_path)
+    _prev_csvs = sorted(_csv_out_dir.glob(f'{_h5_stem}_*.csv')) if _csv_out_dir.exists() else []
     _resume_default = str(_prev_csvs[-1]) if _prev_csvs else ''
     resume_input = pn.widgets.TextInput(
         value=_resume_default,
-        placeholder=f'Path to previous labels CSV (default folder: {_h5_dir})',
+        placeholder=f'Path to previous labels CSV (default folder: {_csv_out_dir})',
         width=500,
     )
     resume_btn = pn.widgets.Button(name='Load CSV', button_type='primary', width=100)
