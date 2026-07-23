@@ -288,6 +288,11 @@ def build_app(data_h5: str | None = None,
     n = len(df)
     print(f'[view]   {n} patches, image_scale={image_scale}')
 
+    # Per-patch max intensity computed from raw patches (for outlier detection)
+    patch_max = (patches_raw.max(axis=(1, 2)) if patches_raw is not None
+                 else df['mean_intensity'].values.astype(float)
+                 if 'mean_intensity' in df.columns else np.zeros(n))
+
     # ── Old-format fallback: individual TIFF files on disk ────────────────────
     recon_patches_dir = result_dir / 'recon' / 'patches'
     recon_images_dir  = result_dir / 'recon' / 'images'
@@ -337,25 +342,21 @@ def build_app(data_h5: str | None = None,
     fa_pred  = df.get('fa_pred',  pd.Series([''] * n)).fillna('').astype(str)
     pos_pred = df.get('pos_pred', pd.Series([''] * n)).fillna('').astype(str)
 
-    # ── Data-only left panel: max_intensity histogram ─────────────────────────
+    # ── Data-only left panel: patch max histogram ─────────────────────────────
     if data_only:
-        max_int  = df['max_intensity'].values.astype(float) \
-                   if 'max_intensity' in df.columns else \
-                   df['mean_intensity'].values.astype(float) \
-                   if 'mean_intensity' in df.columns else np.zeros(n)
         cond_col = 'condition_name' if 'condition_name' in df.columns else 'condition'
         conds    = df[cond_col].fillna('').unique() if cond_col in df.columns else []
 
         fig_hist, ax = plt.subplots(figsize=(5.2, 5.0))
-        ax.hist(max_int, bins=100, color='#888888', alpha=0.75, density=True)
+        ax.hist(patch_max, bins=100, color='#888888', alpha=0.75, density=True)
         ax.axvline(0, color='#4488FF', lw=1.6, ls='--', label='< 0')
         ax.axvline(2, color='#FFCC00', lw=1.6, ls='--', label='> 2')
         ax.axvline(5, color='#FF4444', lw=1.6, ls='--', label='> 5')
-        ax.set_xlabel('max_intensity per patch (per-pixel max)')
+        ax.set_xlabel('patch max pixel intensity')
         ax.set_ylabel('density')
-        n_blue   = int((max_int < 0).sum())
-        n_yellow = int((max_int > 2).sum())
-        n_red    = int((max_int > 5).sum())
+        n_blue   = int((patch_max < 0).sum())
+        n_yellow = int((patch_max > 2).sum())
+        n_red    = int((patch_max > 5).sum())
         ax.set_title(
             f'All patches  N={n}\n'
             f'<0: {n_blue}  >2: {n_yellow}  >5: {n_red}',
@@ -577,8 +578,7 @@ def build_app(data_h5: str | None = None,
                 hs.append(float(ps) * image_scale)
                 fa_col = _label_color(str(row.get('fa_pred', '')), FA_COLOR_MAP)
                 if any_ck:
-                    mi = float(row.get('max_intensity',
-                               row.get('mean_intensity', 0.0)) or 0.0)
+                    mi = float(patch_max[i]) if i < len(patch_max) else 0.0
                     cols.append(_intensity_color(mi, sb, sy, sr, fallback=fa_col))
                 else:
                     cols.append(fa_col)

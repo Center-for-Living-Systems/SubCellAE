@@ -143,8 +143,7 @@ def pack_dataset(ds: str, conditions: list[str], norm: str = "cio") -> Path | No
                 "canvas_cx":             x - PAD_SIZE,
                 "canvas_cy":             y - PAD_SIZE,
                 "ps":                    ps,
-                "mean_intensity":        float((_arr := tifffile.imread(str(t)).astype(np.float32)).mean()),
-                "max_intensity":         float(_arr.max()),
+                "mean_intensity":        float(tifffile.imread(str(t)).mean()),
                 "annotation_label":      -1,
                 "annotation_label_name": "",
             })
