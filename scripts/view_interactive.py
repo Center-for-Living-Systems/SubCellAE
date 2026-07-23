@@ -337,23 +337,25 @@ def build_app(data_h5: str | None = None,
     fa_pred  = df.get('fa_pred',  pd.Series([''] * n)).fillna('').astype(str)
     pos_pred = df.get('pos_pred', pd.Series([''] * n)).fillna('').astype(str)
 
-    # ── Data-only left panel: mean_intensity histogram ────────────────────────
+    # ── Data-only left panel: max_intensity histogram ─────────────────────────
     if data_only:
-        mean_int = df['mean_intensity'].values.astype(float) \
+        max_int  = df['max_intensity'].values.astype(float) \
+                   if 'max_intensity' in df.columns else \
+                   df['mean_intensity'].values.astype(float) \
                    if 'mean_intensity' in df.columns else np.zeros(n)
         cond_col = 'condition_name' if 'condition_name' in df.columns else 'condition'
         conds    = df[cond_col].fillna('').unique() if cond_col in df.columns else []
 
         fig_hist, ax = plt.subplots(figsize=(5.2, 5.0))
-        ax.hist(mean_int, bins=100, color='#888888', alpha=0.75, density=True)
+        ax.hist(max_int, bins=100, color='#888888', alpha=0.75, density=True)
         ax.axvline(0, color='#4488FF', lw=1.6, ls='--', label='< 0')
         ax.axvline(2, color='#FFCC00', lw=1.6, ls='--', label='> 2')
         ax.axvline(5, color='#FF4444', lw=1.6, ls='--', label='> 5')
-        ax.set_xlabel('mean_intensity (CIO, scale=5)')
+        ax.set_xlabel('max_intensity per patch (per-pixel max)')
         ax.set_ylabel('density')
-        n_blue   = int((mean_int < 0).sum())
-        n_yellow = int((mean_int > 2).sum())
-        n_red    = int((mean_int > 5).sum())
+        n_blue   = int((max_int < 0).sum())
+        n_yellow = int((max_int > 2).sum())
+        n_red    = int((max_int > 5).sum())
         ax.set_title(
             f'All patches  N={n}\n'
             f'<0: {n_blue}  >2: {n_yellow}  >5: {n_red}',
@@ -575,7 +577,8 @@ def build_app(data_h5: str | None = None,
                 hs.append(float(ps) * image_scale)
                 fa_col = _label_color(str(row.get('fa_pred', '')), FA_COLOR_MAP)
                 if any_ck:
-                    mi = float(row.get('mean_intensity', 0.0) or 0.0)
+                    mi = float(row.get('max_intensity',
+                               row.get('mean_intensity', 0.0)) or 0.0)
                     cols.append(_intensity_color(mi, sb, sy, sr, fallback=fa_col))
                 else:
                     cols.append(fa_col)
