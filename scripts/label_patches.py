@@ -563,28 +563,55 @@ def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
             status_md.object = '<i style="color:#e55;">No labels to save.</i>'
             return
         annotator = name_input.value.strip().replace(' ', '_') or 'unknown'
-        stamp = datetime.now().strftime('%Y%m%d_%H%M')
-        h5_stem = Path(h5_path).stem
-        out = _label_csv_dir(h5_path) / f'{h5_stem}_{annotator}_{stamp}.csv'
-        out.parent.mkdir(parents=True, exist_ok=True)
-        rows = [{'filename': fn, 'label': lbl, 'annotator': annotator}
-                for fn, lbl in labels.items()]
-        pd.DataFrame(rows).to_csv(out, index=False)
+        stamp     = datetime.now().strftime('%Y%m%d_%H%M')
+        h5_stem   = Path(h5_path).stem
+        fname     = f'{h5_stem}_{annotator}_{stamp}.csv'
+        rows      = [{'filename': fn, 'label': lbl, 'annotator': annotator}
+                     for fn, lbl in labels.items()]
+        df_out    = pd.DataFrame(rows)
+
+        # 1. Always save next to the H5 file
+        h5_out = Path(h5_path).parent / fname
+        try:
+            df_out.to_csv(h5_out, index=False)
+            primary_msg = f'✓ Saved {len(labels)} labels → {h5_out.name}'
+        except Exception as exc:
+            primary_msg = f'[warn] .h5 folder save failed: {exc}'
+            print(primary_msg, flush=True)
+
+        # 2. Attempt secure copy to image_service
+        svc_out = _label_csv_dir(h5_path) / fname
+        try:
+            svc_out.parent.mkdir(parents=True, exist_ok=True)
+            df_out.to_csv(svc_out, index=False)
+            svc_msg = f'<br><span style="font-size:11px;color:#aaa;">+ {svc_out}</span>'
+        except Exception as exc:
+            svc_msg = (f'<br><span style="font-size:11px;color:#e88;">'
+                       f'image_service save failed: {exc}</span>')
+            print(f'[label] image_service CSV save failed: {exc}', flush=True)
+
         status_md.object = (
             f'<span style="color:#3c3;font-size:13px;font-weight:bold;">'
-            f'✓ Saved {len(labels)} labels → {out.name}</span>'
+            f'{primary_msg}</span>{svc_msg}'
         )
 
     finish_btn.on_click(_on_finish)
 
     # ── Resume from previous CSV ──────────────────────────────────────────────
-    _h5_stem = Path(h5_path).stem
-    _csv_out_dir = _label_csv_dir(h5_path)
-    _prev_csvs = sorted(_csv_out_dir.glob(f'{_h5_stem}_*.csv')) if _csv_out_dir.exists() else []
-    _resume_default = str(_prev_csvs[-1]) if _prev_csvs else ''
+    _h5_stem     = Path(h5_path).stem
+    _h5_dir      = Path(h5_path).parent
+    _csv_svc_dir = _label_csv_dir(h5_path)
+    # Search both the .h5 folder and the image_service folder; pick the most recent
+    _prev_h5  = list(_h5_dir.glob(f'{_h5_stem}_*.csv')) if _h5_dir.exists() else []
+    _prev_svc = list(_csv_svc_dir.glob(f'{_h5_stem}_*.csv')) if _csv_svc_dir.exists() else []
+    _all_prev = sorted(
+        _prev_h5 + _prev_svc,
+        key=lambda p: p.stat().st_mtime,
+    )
+    _resume_default = str(_all_prev[-1]) if _all_prev else ''
     resume_input = pn.widgets.TextInput(
         value=_resume_default,
-        placeholder=f'Path to previous labels CSV (default folder: {_csv_out_dir})',
+        placeholder=f'Path to previous labels CSV (.h5 folder or {_csv_svc_dir})',
         width=500,
     )
     resume_btn = pn.widgets.Button(name='Load CSV', button_type='primary', width=100)
