@@ -192,10 +192,11 @@ def _norm_image(arr: np.ndarray) -> np.ndarray:
     return arr.astype(np.float32)
 
 
-def _make_pixel_overlay(arr: np.ndarray, show_blue: bool,
-                        show_yellow: bool, show_red: bool) -> np.ndarray:
+def _make_pixel_overlay(arr: np.ndarray, patch_mask: np.ndarray,
+                        show_blue: bool, show_yellow: bool, show_red: bool) -> np.ndarray:
     """Return a (H, W) uint32 RGBA array for Bokeh image_rgba (y-flipped).
 
+    Only pixels where patch_mask is True are considered.
     Encoding: R | G<<8 | B<<16 | A<<24  (little-endian, α=160).
       Blue   #4488FF : pixels < 0
       Yellow #FFCC00 : pixels in (2, 5]
@@ -204,13 +205,28 @@ def _make_pixel_overlay(arr: np.ndarray, show_blue: bool,
     H, W = arr.shape[:2]
     rgba = np.zeros((H, W, 4), dtype=np.uint8)
     if show_blue:
-        rgba[arr < 0] = [0x44, 0x88, 0xFF, 160]
+        rgba[patch_mask & (arr < 0)] = [0x44, 0x88, 0xFF, 160]
     if show_yellow:
-        rgba[(arr > 2) & (arr <= 5)] = [0xFF, 0xCC, 0x00, 160]
+        rgba[patch_mask & (arr > 2) & (arr <= 5)] = [0xFF, 0xCC, 0x00, 160]
     if show_red:
-        rgba[arr > 5] = [0xFF, 0x44, 0x44, 160]
+        rgba[patch_mask & (arr > 5)] = [0xFF, 0x44, 0x44, 160]
     packed = np.ascontiguousarray(rgba).view(np.uint32).reshape(H, W)
     return np.ascontiguousarray(np.flipud(packed))
+
+
+def _patch_intensity_overlay(arr: np.ndarray, show_blue: bool,
+                              show_yellow: bool, show_red: bool) -> np.ndarray | None:
+    """Return float32 RGBA (H, W, 4) overlay for matplotlib imshow, or None."""
+    if not (show_blue or show_yellow or show_red):
+        return None
+    ov = np.zeros((*arr.shape[:2], 4), dtype=np.float32)
+    if show_blue:
+        ov[arr < 0]                   = [0x44/255, 0x88/255, 1.0,      160/255]
+    if show_yellow:
+        ov[(arr > 2) & (arr <= 5)]    = [1.0,      0xCC/255, 0.0,      160/255]
+    if show_red:
+        ov[arr > 5]                   = [1.0,      0x44/255, 0x44/255, 160/255]
+    return ov
 
 
 def _flip_for_bokeh(arr: np.ndarray) -> np.ndarray:
@@ -251,13 +267,18 @@ def _fig_to_pane(fig: plt.Figure, dpi: int = 130) -> pn.pane.PNG:
 
 
 def _patch_figure(raw: np.ndarray, recon: np.ndarray | None = None,
-                  title: str = '') -> pn.pane.PNG:
+                  title: str = '',
+                  show_blue: bool = False, show_yellow: bool = False,
+                  show_red: bool = False) -> pn.pane.PNG:
     panels = [('Raw', raw)] + ([('Recon', recon)] if recon is not None else [])
     fig, axes = plt.subplots(1, len(panels), figsize=(2.6 * len(panels), 2.6))
     if len(panels) == 1:
         axes = [axes]
     for ax, (lbl, arr) in zip(axes, panels):
         ax.imshow(arr, cmap='gray', vmin=0, vmax=1, interpolation='nearest')
+        ov = _patch_intensity_overlay(arr, show_blue, show_yellow, show_red)
+        if ov is not None:
+            ax.imshow(ov, interpolation='nearest')
         ax.set_title(lbl, fontsize=10)
         ax.axis('off')
     if title:
@@ -587,9 +608,23 @@ def build_app(data_h5: str | None = None,
                 )
                 return
             arr = _get_canvas(_state['group'])
+            H, W = arr.shape[:2]
+            # Build mask: True only within each patch's bounding box
+            mask = np.zeros((H, W), dtype=bool)
+            sub = df[df[pg_col].astype(str) == _state['group']]
+            for _, row in sub.iterrows():
+                cx = row.get('canvas_cx', np.nan)
+                cy = row.get('canvas_cy', np.nan)
+                ps = int(row.get('ps', 32))
+                if pd.isna(cx) or pd.isna(cy):
+                    continue
+                half = ps // 2
+                r0, r1 = max(0, int(cy) - half), min(H, int(cy) + half)
+                c0, c1 = max(0, int(cx) - half), min(W, int(cx) + half)
+                mask[r0:r1, c0:c1] = True
             overlay_src.data = dict(
-                image=[_make_pixel_overlay(arr, sb, sy, sr)],
-                x=[0], y=[0], dw=[arr.shape[1]], dh=[arr.shape[0]],
+                image=[_make_pixel_overlay(arr, mask, sb, sy, sr)],
+                x=[0], y=[0], dw=[W], dh=[H],
             )
 
         # Helper: build rect data for a group (in Bokeh flipped-y coordinates)
@@ -675,6 +710,9 @@ def build_app(data_h5: str | None = None,
             patch_col.objects = [_patch_figure(
                 patches_raw[idx], recon_arr,
                 title=Path(fname).stem,
+                show_blue=ck_blue.value,
+                show_yellow=ck_yellow.value,
+                show_red=ck_red.value,
             )]
         elif has_old_patches:
             stem    = Path(fname).stem
