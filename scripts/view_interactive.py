@@ -195,11 +195,15 @@ def load_h5(path: str):
 
 # ── Image helpers ─────────────────────────────────────────────────────────────
 
-def _norm_image(arr: np.ndarray) -> np.ndarray:
-    """Normalise to float32 [0, 1]."""
+def _norm_image(arr: np.ndarray, pct: float = 99.9) -> np.ndarray:
+    """Normalise to float32 [0, 1] using percentile clip for display."""
     if arr.dtype == np.uint8:
         return arr.astype(np.float32) / 255.0
-    return np.clip(arr.astype(np.float32), 0.0, 1.0)
+    a = arr.astype(np.float32)
+    hi = float(np.percentile(a, pct))
+    if hi <= 0:
+        hi = float(a.max())
+    return np.clip(a, 0.0, hi) / hi if hi > 0 else a
 
 
 def _flip_for_bokeh(arr: np.ndarray) -> np.ndarray:
