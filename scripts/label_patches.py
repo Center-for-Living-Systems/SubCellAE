@@ -39,7 +39,8 @@ from subcellae.utils.label_colors import (
 pn.extension(sizing_mode='stretch_width')
 
 # ── Label CSV output directory ────────────────────────────────────────────────
-_LABEL_CSV_ROOT = Path('/mnt/service/image_service/FA_label_csv')
+_LABEL_CSV_ROOT      = Path('/mnt/service/image_service/FA_label_csv')
+_IMAGE_SERVICE_LABEL = Path('/mnt/p/image_service/data/FA_patch_data/cio_rb')
 _KNOWN_DATASETS = ['vinc', 'ppax', 'pfak', 'nih3t3']
 
 def _label_csv_dir(h5_path: str) -> Path:
@@ -48,10 +49,49 @@ def _label_csv_dir(h5_path: str) -> Path:
     for ds in _KNOWN_DATASETS:
         if ds in parts:
             return _LABEL_CSV_ROOT / ds
-    # fallback: use stem prefix if no known dataset found in path
     stem = Path(h5_path).stem
     ds = next((ds for ds in _KNOWN_DATASETS if stem.startswith(ds)), 'unknown')
     return _LABEL_CSV_ROOT / ds
+
+
+def _resolve_label_h5(path: str) -> str:
+    """Return the most recent label H5 between the given path and its image_service mirror.
+
+    Checks /mnt/p/image_service/data/FA_patch_data/cio_rb/{ds}/{filename}.
+    Prefers image_service when both exist and have equal mtime.
+    Falls back to the given path on any error.
+    """
+    p = Path(path)
+    if not p.exists():
+        return path
+
+    stem = p.name  # e.g. vinc_control_label.h5
+    ds   = next((d for d in _KNOWN_DATASETS if stem.startswith(d)), None)
+    if ds is None:
+        return path
+
+    svc = _IMAGE_SERVICE_LABEL / ds / stem
+
+    if not _IMAGE_SERVICE_LABEL.exists():
+        print(f'[label] image_service not mounted — using: {p}')
+        return path
+
+    if not svc.exists():
+        print(f'[label] No image_service copy — using: {p}')
+        return path
+
+    try:
+        p_mtime   = p.stat().st_mtime
+        svc_mtime = svc.stat().st_mtime
+    except OSError as exc:
+        print(f'[label] Cannot stat image_service copy ({exc}) — using: {p}')
+        return path
+
+    if svc_mtime >= p_mtime:
+        print(f'[label] image_service copy same age or newer — loading: {svc}')
+        return str(svc)
+    print(f'[label] Primary copy is newer — loading: {p}')
+    return path
 
 # Labels available in this tool
 LABEL_OPTIONS = [
@@ -116,6 +156,7 @@ def load_h5(path: str):
 # ── App ───────────────────────────────────────────────────────────────────────
 
 def build_labeler(h5_path: str, location: str = '') -> pn.viewable.Viewable:
+    h5_path = _resolve_label_h5(h5_path)
     df, images_raw, img_meta, patches_allch, images_allch, _loaded_ch_names, _, image_scale, result_dir = load_h5(h5_path)
 
     if _loaded_ch_names:

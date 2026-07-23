@@ -63,47 +63,6 @@ from subcellae.utils.label_colors import (
 )
 FALLBACK = "#cccccc"
 
-# ── image_service mirror resolution ──────────────────────────────────────────
-_IMAGE_SERVICE_ROOT = Path("/mnt/p/image_service/data/FA_patch_data")
-
-
-def _resolve_data_h5(path: str) -> str:
-    """Return the most recent data.h5 between the given path and its image_service mirror.
-
-    Prefers the image_service copy when both exist and have the same mtime.
-    Falls back to the given path if image_service is unreachable or the file
-    doesn't match the expected {norm}/{ds}/data.h5 pattern.
-    """
-    p = Path(path)
-    if p.name != "data.h5" or not p.exists():
-        return path
-
-    ds   = p.parent.name
-    norm = p.parent.parent.name
-    svc  = _IMAGE_SERVICE_ROOT / norm / ds / "data.h5"
-
-    if not _IMAGE_SERVICE_ROOT.exists():
-        print(f'[view] image_service not mounted — using: {p}')
-        return path
-
-    if not svc.exists():
-        print(f'[view] No image_service copy found — using: {p}')
-        return path
-
-    try:
-        p_mtime   = p.stat().st_mtime
-        svc_mtime = svc.stat().st_mtime
-    except OSError as exc:
-        print(f'[view] Could not stat image_service copy ({exc}) — using: {p}')
-        return path
-
-    if svc_mtime >= p_mtime:
-        print(f'[view] image_service copy is same age or newer — loading: {svc}')
-        return str(svc)
-    else:
-        print(f'[view] Primary copy is newer — loading: {p}')
-        return path
-
 # Grayscale palette: index 0 → black, index 255 → white
 try:
     from bokeh.palettes import gray as _bk_gray
@@ -178,9 +137,6 @@ def load_sources(data_h5: str | None, model_h5: str | None):
 
     Returns the same 9-tuple as the old load_h5().
     """
-    if data_h5:
-        data_h5 = _resolve_data_h5(data_h5)
-
     if data_h5 and model_h5:
         print(f'[view] data  : {data_h5}')
         print(f'[view] model : {model_h5}')

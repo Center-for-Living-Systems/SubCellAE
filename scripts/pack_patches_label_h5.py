@@ -44,7 +44,8 @@ import tifffile
 
 # ── config ─────────────────────────────────────────────────────────────────────
 
-DATA_ROOT = Path("/net/projects/CLS/lding/data/fa_data_analysis")
+DATA_ROOT          = Path("/net/projects/CLS/lding/data/fa_data_analysis")
+IMAGE_SERVICE_ROOT = Path("/mnt/p/image_service/data/FA_patch_data/cio_rb")
 PATCHES_ROOT = DATA_ROOT / "ae_results/patches/cio_rb"
 FRAMES_ROOT  = DATA_ROOT / "ae_results/source_frames/cio_rb"
 
@@ -205,6 +206,21 @@ def pack(ds: str, cond: str) -> Path | None:
 
     size_mb = out_path.stat().st_size / 1e6
     print(f"    → {out_path}  ({size_mb:.1f} MB)", flush=True)
+
+    # Copy to image_service NAS if mounted
+    if IMAGE_SERVICE_ROOT.exists():
+        import shutil
+        svc_dir  = IMAGE_SERVICE_ROOT / ds
+        svc_path = svc_dir / f"{ds}_{cond}_label.h5"
+        try:
+            svc_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(out_path), str(svc_path))
+            print(f"    → {svc_path}  (image_service copy)", flush=True)
+        except Exception as exc:
+            print(f"    [warn] image_service copy failed: {exc}", flush=True)
+    else:
+        print(f"    [skip] image_service not mounted ({IMAGE_SERVICE_ROOT})", flush=True)
+
     return out_path
 
 
