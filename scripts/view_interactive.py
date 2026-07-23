@@ -884,9 +884,36 @@ if pn.state.served:
         build_loader_app().servable()
 
 if __name__ == '__main__':
-    _data_h5, _model_h5 = _get_cli_paths()
-    if _data_h5 or _model_h5:
-        pn.serve(build_app(data_h5=_data_h5, model_h5=_model_h5),
-                 show=True, port=5006, autoreload=False)
+    import argparse
+    import socket as _socket
+
+    ap = argparse.ArgumentParser(description='Interactive FA patch viewer.')
+    ap.add_argument('h5', nargs='*', help='data.h5 [model.h5]  (0–2 files)')
+    ap.add_argument('--port',  type=int, default=5006)
+    ap.add_argument('--serve', action='store_true',
+                    help='Bind to 0.0.0.0 for network access (others connect via IP)')
+    _args = ap.parse_args()
+
+    if len(_args.h5) >= 2:
+        _data_h5, _model_h5 = _args.h5[0], _args.h5[1]
+    elif len(_args.h5) == 1:
+        _data_h5, _model_h5 = None, _args.h5[0]
     else:
-        pn.serve(build_loader_app(), show=True, port=5006, autoreload=False)
+        _data_h5, _model_h5 = None, None
+
+    _app = (build_app(data_h5=_data_h5, model_h5=_model_h5)
+            if (_data_h5 or _model_h5) else build_loader_app())
+
+    if _args.serve:
+        try:
+            _s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            _s.connect(('8.8.8.8', 80))
+            _host_ip = _s.getsockname()[0]
+            _s.close()
+        except Exception:
+            _host_ip = '0.0.0.0'
+        print(f'[view] Serving on http://{_host_ip}:{_args.port}')
+        pn.serve(_app, address='0.0.0.0', port=_args.port,
+                 allow_websocket_origin=['*'], show=False, autoreload=False)
+    else:
+        pn.serve(_app, show=True, port=_args.port, autoreload=False)
