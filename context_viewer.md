@@ -1,0 +1,240 @@
+# Context: Interactive Patch Viewer (`scripts/view_interactive.py`)
+
+This file gives Claude Code enough background to continue development of the
+interactive viewer without re-explaining prior decisions.
+
+---
+
+## What the viewer is
+
+A Panel + Bokeh web app for exploring FA patch data.  Two directions of use:
+
+- **Direction A — UMAP → detail**: hover a UMAP dot for a thumbnail tooltip;
+  tap a dot to load the full patch detail panel below.
+- **Direction B — Canvas → UMAP**: pick a source image from the dropdown;
+  full paxillin canvas is shown with coloured patch boxes; clicking a box
+  highlights it on the UMAP and loads the detail panel.
+
+Three modes depending on what H5 files are given:
+
+| Mode | Files | Left panel |
+|------|-------|------------|
+| Data-only | `data.h5` only | Per-pixel intensity histogram |
+| Model (single-file legacy) | `interactive.h5` | UMAP scatter |
+| Two-file | `data.h5` + `model.h5` | UMAP scatter (images from data.h5) |
+
+---
+
+## How to run (on the Ubuntu server 128.135.108.226)
+
+```bash
+# activate env first — the server does not auto-activate conda
+conda activate <env_name>         # or source activate, whatever the server uses
+
+# Data-only mode (no UMAP — just canvas + histogram)
+python scripts/view_interactive.py \
+    /path/to/ae_results/patches/cio/vinc/data.h5 \
+    --serve --port 5006
+
+# Two-file mode (UMAP + canvas)
+python scripts/view_interactive.py \
+    /path/to/data.h5  /path/to/model.h5 \
+    --serve --port 5006
+```
+
+`--serve` binds to `0.0.0.0` so other machines can connect.  The script
+prints the LAN IP on startup.  Access from the workstation:
+`http://128.135.108.226:5006`
+
+Port 5006 must be open in UFW:
+```bash
+sudo ufw allow 5006/tcp
+sudo ufw status   # verify
+```
+
+---
+
+## H5 file design (two-file split)
+
+### `data.h5`  — static, shared across models
+
+Built by `scripts/pack_data_h5.py`.
+
+```
+patches/raw       float32 (N, 32, 32)   all conditions combined
+images/raw        float32 (M, H, W)     paxillin frames
+images/{ch}       float32 (M, H, W)     vinc / ppax / pfak / zyx / act
+images/meta       bytes (CSV)           group, frame (row index), condition_name, frame_idx
+meta/csv          bytes (CSV)           per-patch: filename, condition_name, group,
+                                        frame_idx, canvas_cx, canvas_cy, ps,
+                                        mean_intensity, annotation_label, annotation_label_name
+attrs: pad_size, image_scale, dataset, n_patches, n_frames, channels (JSON)
+```
+
+**Key coordinate convention**: `canvas_cx`, `canvas_cy` in `meta/csv` are the
+**centre** of each patch in unpadded canvas pixel space (i.e. already
+`x_padded - pad_size`).  Patch covers
+`[cy - ps//2 : cy + ps//2, cx - ps//2 : cx + ps//2]` in the canvas array.
+
+### `model.h5`  — per-model outputs
+
+Built by `scripts/pack_model_h5.py`.
+
+```
+patches/raw       float32 (N, 32, 32)   (same patches, model-row order)
+patches/recon     float32 (N, 32, 32)   AE reconstructions
+latents           float32 (N, D)
+meta/csv          bytes (CSV)           includes UMAP_1, UMAP_2, fa_pred, pos_pred, z_*
+plots/…           bytes (PNG)           MSE plots packed in
+```
+
+---
+
+## Intensity / normalisation facts (CIO norm)
+
+- CIO-normalised pixel values are **not** clipped to [0, 1].  They can reach
+  10+ in bright frames.
+- Patch means are ~0.15–0.17.  Patch max (32×32 crop) reaches ~2–3 for most
+  datasets.
+- The `>2` and `>5` outlier thresholds are **per-pixel** thresholds on the
+  actual float32 values.
+- `_norm_image()` does **no clipping** — just casts to float32.  The canvas
+  is displayed with `vmin=0, vmax=1`; bright pixels simply saturate white.
+- The histogram in data-only mode shows `patches_raw.flatten()` (per-pixel
+  distribution, 200 bins).
+
+---
+
+## Canvas pixel overlay (intensity highlight)
+
+Three checkboxes: `< 0 (blue)`, `> 2 (yellow)`, `> 5 (red)`.
+
+When any box is ticked:
+
+1. **Canvas overlay** (`_refresh_overlay`): builds a boolean `patch_mask`
+   from every patch's bounding box for the current frame, then creates a
+   `(H, W)` uint32 RGBA array via `_make_pixel_overlay` and pushes it into
+   `overlay_src` which feeds an `image_rgba` renderer layered on top of the
+   canvas figure.  Only pixels **inside** patch boxes get coloured.
+
+2. **Zoom-in detail** (`_refresh_detail`): re-calls `_show_detail` with the
+   last selected patch index (`_last_detail_idx[0]`), which re-renders the
+   matplotlib patch image with `_patch_intensity_overlay` applied on top of
+   the grayscale imshow.
+
+Both update live when any checkbox toggles.
+
+### Key helpers
+
+| Function | Where | Purpose |
+|----------|-------|---------|
+| `_make_pixel_overlay(arr, patch_mask, sb, sy, sr)` | module level | uint32 RGBA for Bokeh `image_rgba`, y-flipped |
+| `_patch_intensity_overlay(arr, sb, sy, sr)` | module level | float32 RGBA for matplotlib imshow overlay |
+| `_refresh_overlay()` | closure in `has_images` block | rebuild canvas overlay from current frame + state |
+| `_refresh_detail(_=None)` | closure after `_show_detail` | re-render zoom-in if a patch is selected |
+| `_last_detail_idx` | `list[int\|None]` | single-element list tracking last `_show_detail` call |
+
+---
+
+## Bokeh coordinate system
+
+The canvas image is displayed with `np.flipud` so that row 0 of the array
+appears at the top.  The convention throughout:
+
+```
+Bokeh y  =  img_H - canvas_y       (for rects and tap events)
+canvas_y =  img_H - Bokeh y
+```
+
+`image_rgba` and `image` renderers share the same coordinate system.
+`overlay_src` must be updated with `dw=W, dh=H` matching the current frame
+whenever the group changes (`_load_group` calls `_refresh_overlay()`).
+
+---
+
+## Layout skeleton
+
+```
+pn.Column(
+    header HTML,
+    pn.Row(
+        left_col,       # UMAP pane (Bokeh) OR histogram + dataset info (data-only)
+        Spacer,
+        canvas_col,     # Select widget + highlight checkboxes + Bokeh canvas pane
+        Spacer,
+        detail_col,     # patch text + zoom-in patch PNG + legend + MSE button
+    )
+)
+```
+
+---
+
+## CLI / serving
+
+```
+__main__ block:
+  ap.add_argument('h5', nargs='*')   # 0, 1, or 2 H5 paths
+  ap.add_argument('--port', type=int, default=5006)
+  ap.add_argument('--serve', action='store_true')
+
+0 paths  →  build_loader_app()  (web form to enter paths)
+1 path   →  load_sources(None, path)  (single-file / model.h5 mode)
+2 paths  →  load_sources(path[0], path[1])  (data.h5 + model.h5)
+```
+
+When served via `panel serve` instead of `python`:
+`pn.state.session_args['args']` is read in `_get_cli_paths()`.
+
+---
+
+## Things to know / traps
+
+- **Do not add back `max_intensity` to `data.h5`** — outlier stats are
+  computed in-memory from `patches_raw` in the viewer, not stored in H5.
+- **Patch box colours** always use FA-type colour (from `FA_COLOR_MAP`).
+  Intensity does NOT recolour boxes — intensity is shown only via the RGBA
+  pixel overlay.
+- **`_show_detail` must update `_last_detail_idx[0]`** at its very start so
+  that `_refresh_detail` can re-invoke it when checkboxes change.
+- **`_rects_for_group` uses `df.iterrows()`** which is slow for large
+  datasets but acceptable for typical frame sizes (~200–500 patches/frame).
+- The `image_rgba` renderer's `x`, `y`, `dw`, `dh` are read from
+  `overlay_src.data`, not from the glyph call kwargs — pass them as column
+  names (strings) in the `image_rgba(...)` call, or update them in
+  `overlay_src.data` on every group switch.
+
+---
+
+## Git workflow with the server
+
+The server (`dsadmin@128.135.108.226`) has the repo cloned at the same path.
+Push from this workstation, then SSH to the server and pull:
+
+```bash
+# workstation
+git push
+
+# server
+ssh dsadmin@128.135.108.226
+cd /path/to/SubCellAE
+git pull
+```
+
+The SSH alias `viewserver` in `~/.ssh/config` on this workstation connects
+to 128.135.108.226 as `dsadmin`.
+
+---
+
+## Data paths on the server
+
+Data lives on a NAS (mounted at `/net/projects/` on the cluster).  The server
+may have it mounted differently — check before assuming paths match.
+
+```
+ae_results/patches/cio/{ds}/data.h5       ← packed by pack_data_h5.py --norm cio
+ae_results/patches/cio_rb/{ds}/data.h5    ← cio_rb variant
+ae_results/patches/cio/{ds}/{model}/model.h5
+```
+
+`/mnt/p/image_service/` is the NAS mirror path for pre-packed H5 files
+served to the viewer; may or may not be mounted on the server.
