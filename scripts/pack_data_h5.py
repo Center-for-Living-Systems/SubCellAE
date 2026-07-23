@@ -234,10 +234,13 @@ def pack_dataset(ds: str, conditions: list[str], norm: str = "cio") -> Path | No
     svc_dir = IMAGE_SERVICE_ROOT / norm / ds
     if IMAGE_SERVICE_ROOT.exists():
         import shutil
-        svc_dir.mkdir(parents=True, exist_ok=True)
-        svc_path = svc_dir / "data.h5"
-        shutil.copy2(str(out_path), str(svc_path))
-        print(f"  → {svc_path}  (image_service copy)", flush=True)
+        try:
+            svc_dir.mkdir(parents=True, exist_ok=True)
+            svc_path = svc_dir / "data.h5"
+            shutil.copy2(str(out_path), str(svc_path))
+            print(f"  → {svc_path}  (image_service copy)", flush=True)
+        except Exception as exc:
+            print(f"  [warn] image_service copy failed: {exc}", flush=True)
     else:
         print(f"  [skip] image_service not mounted ({IMAGE_SERVICE_ROOT})", flush=True)
 
