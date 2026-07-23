@@ -506,10 +506,11 @@ def build_app(data_h5: str | None = None,
         left_col = pn.pane.Bokeh(bk_column(color_select, p_umap))
     # end if/else data_only
 
-    # ── Outlier highlight checkboxes (shared with canvas) ─────────────────────
+    # ── Outlier highlight checkboxes (shared with canvas and detail panel) ───────
     ck_blue   = pn.widgets.Checkbox(name="< 0  (blue)",   value=False)
     ck_yellow = pn.widgets.Checkbox(name="> 2  (yellow)", value=False)
     ck_red    = pn.widgets.Checkbox(name="> 5  (red)",    value=False)
+    _last_detail_idx: list[int | None] = [None]  # tracks last patch shown in detail
 
     # ── Full image Bokeh figure (Direction B) ─────────────────────────────────
     has_images = (images_raw is not None and img_meta is not None) or has_old_images
@@ -685,6 +686,7 @@ def build_app(data_h5: str | None = None,
     patch_col = pn.Column(pn.pane.Markdown(''), width=300)
 
     def _show_detail(idx: int) -> None:
+        _last_detail_idx[0] = idx
         row   = df.iloc[idx]
         fa    = str(row.get('fa_pred',  '--'))
         pos   = str(row.get('pos_pred', '--'))
@@ -732,6 +734,15 @@ def build_app(data_h5: str | None = None,
                 patch_col.objects = [_patch_figure(raw_arr, recon_arr, title=stem)]
             else:
                 patch_col.objects = [pn.pane.Markdown(f'*Patch files not found for {stem}*')]
+
+    # Re-render detail panel when checkboxes change (so overlay updates live)
+    def _refresh_detail(_=None):
+        if _last_detail_idx[0] is not None:
+            _show_detail(_last_detail_idx[0])
+
+    ck_blue.param.watch(_refresh_detail, 'value')
+    ck_yellow.param.watch(_refresh_detail, 'value')
+    ck_red.param.watch(_refresh_detail, 'value')
 
     # ── Direction A: UMAP tap → detail + canvas highlight ─────────────────────
     def _on_umap_tap(attr, old, new):
