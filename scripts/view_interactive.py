@@ -214,6 +214,20 @@ def _make_pixel_overlay(arr: np.ndarray, patch_mask: np.ndarray,
     return np.ascontiguousarray(np.flipud(packed))
 
 
+def _patch_intensity_overlay(arr: np.ndarray, show_blue: bool,
+                              show_yellow: bool, show_red: bool) -> np.ndarray | None:
+    """Return float32 RGBA (H, W, 4) overlay for matplotlib imshow, or None."""
+    if not (show_blue or show_yellow or show_red):
+        return None
+    ov = np.zeros((*arr.shape[:2], 4), dtype=np.float32)
+    if show_blue:
+        ov[arr < 0]                = [0x44/255, 0x88/255, 1.0,      160/255]
+    if show_yellow:
+        ov[(arr > 2) & (arr <= 5)] = [1.0,      0xCC/255, 0.0,      160/255]
+    if show_red:
+        ov[arr > 5]                = [1.0,      0x44/255, 0x44/255, 160/255]
+    return ov
+
 
 def _flip_for_bokeh(arr: np.ndarray) -> np.ndarray:
     """Flip vertically so array row-0 renders at the top of a Bokeh figure.
@@ -253,13 +267,18 @@ def _fig_to_pane(fig: plt.Figure, dpi: int = 130) -> pn.pane.PNG:
 
 
 def _patch_figure(raw: np.ndarray, recon: np.ndarray | None = None,
-                  title: str = '') -> pn.pane.PNG:
+                  title: str = '',
+                  show_blue: bool = False, show_yellow: bool = False,
+                  show_red: bool = False) -> pn.pane.PNG:
     panels = [('Raw', raw)] + ([('Recon', recon)] if recon is not None else [])
     fig, axes = plt.subplots(1, len(panels), figsize=(2.6 * len(panels), 2.6))
     if len(panels) == 1:
         axes = [axes]
     for ax, (lbl, arr) in zip(axes, panels):
         ax.imshow(arr, cmap='gray', vmin=0, vmax=1, interpolation='nearest')
+        ov = _patch_intensity_overlay(arr, show_blue, show_yellow, show_red)
+        if ov is not None:
+            ax.imshow(ov, interpolation='nearest')
         ax.set_title(lbl, fontsize=10)
         ax.axis('off')
     if title:
@@ -691,6 +710,9 @@ def build_app(data_h5: str | None = None,
             patch_col.objects = [_patch_figure(
                 patches_raw[idx], recon_arr,
                 title=Path(fname).stem,
+                show_blue=ck_blue.value,
+                show_yellow=ck_yellow.value,
+                show_red=ck_red.value,
             )]
         elif has_old_patches:
             stem    = Path(fname).stem
