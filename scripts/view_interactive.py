@@ -75,16 +75,6 @@ def _label_color(label: str, color_map: dict) -> str:
     return color_map.get(str(label), FALLBACK)
 
 
-def _intensity_color(mean_intensity: float, show_blue: bool,
-                     show_yellow: bool, show_red: bool,
-                     fallback: str = FALLBACK) -> str:
-    """Return an intensity-based highlight colour, or fallback if no threshold matches."""
-    if show_red    and mean_intensity > 5: return "#FF4444"
-    if show_yellow and mean_intensity > 2: return "#FFCC00"
-    if show_blue   and mean_intensity < 0: return "#4488FF"
-    return fallback
-
-
 # ── HDF5 loading ──────────────────────────────────────────────────────────────
 
 def _read_h5_model(path: str):
@@ -202,6 +192,27 @@ def _norm_image(arr: np.ndarray) -> np.ndarray:
     return arr.astype(np.float32)
 
 
+def _make_pixel_overlay(arr: np.ndarray, show_blue: bool,
+                        show_yellow: bool, show_red: bool) -> np.ndarray:
+    """Return a (H, W) uint32 RGBA array for Bokeh image_rgba (y-flipped).
+
+    Encoding: R | G<<8 | B<<16 | A<<24  (little-endian, α=160).
+      Blue   #4488FF : pixels < 0
+      Yellow #FFCC00 : pixels in (2, 5]
+      Red    #FF4444 : pixels > 5
+    """
+    H, W = arr.shape[:2]
+    rgba = np.zeros((H, W, 4), dtype=np.uint8)
+    if show_blue:
+        rgba[arr < 0] = [0x44, 0x88, 0xFF, 160]
+    if show_yellow:
+        rgba[(arr > 2) & (arr <= 5)] = [0xFF, 0xCC, 0x00, 160]
+    if show_red:
+        rgba[arr > 5] = [0xFF, 0x44, 0x44, 160]
+    packed = np.ascontiguousarray(rgba).view(np.uint32).reshape(H, W)
+    return np.ascontiguousarray(np.flipud(packed))
+
+
 def _flip_for_bokeh(arr: np.ndarray) -> np.ndarray:
     """Flip vertically so array row-0 renders at the top of a Bokeh figure.
 
@@ -288,10 +299,6 @@ def build_app(data_h5: str | None = None,
     n = len(df)
     print(f'[view]   {n} patches, image_scale={image_scale}')
 
-    # Per-patch max intensity computed from raw patches (for outlier detection)
-    patch_max = (patches_raw.max(axis=(1, 2)) if patches_raw is not None
-                 else df['mean_intensity'].values.astype(float)
-                 if 'mean_intensity' in df.columns else np.zeros(n))
 
     # ── Old-format fallback: individual TIFF files on disk ────────────────────
     recon_patches_dir = result_dir / 'recon' / 'patches'
@@ -347,18 +354,20 @@ def build_app(data_h5: str | None = None,
         cond_col = 'condition_name' if 'condition_name' in df.columns else 'condition'
         conds    = df[cond_col].fillna('').unique() if cond_col in df.columns else []
 
+        px_vals = (patches_raw.flatten().astype(np.float32)
+                   if patches_raw is not None else np.zeros(0, dtype=np.float32))
         fig_hist, ax = plt.subplots(figsize=(5.2, 5.0))
-        ax.hist(patch_max, bins=100, color='#888888', alpha=0.75, density=True)
+        ax.hist(px_vals, bins=200, color='#888888', alpha=0.75, density=True)
         ax.axvline(0, color='#4488FF', lw=1.6, ls='--', label='< 0')
         ax.axvline(2, color='#FFCC00', lw=1.6, ls='--', label='> 2')
         ax.axvline(5, color='#FF4444', lw=1.6, ls='--', label='> 5')
-        ax.set_xlabel('patch max pixel intensity')
+        ax.set_xlabel('pixel intensity')
         ax.set_ylabel('density')
-        n_blue   = int((patch_max < 0).sum())
-        n_yellow = int((patch_max > 2).sum())
-        n_red    = int((patch_max > 5).sum())
+        n_blue   = int((px_vals < 0).sum())
+        n_yellow = int((px_vals > 2).sum())
+        n_red    = int((px_vals > 5).sum())
         ax.set_title(
-            f'All patches  N={n}\n'
+            f'All patches  N={n}  ({len(px_vals):,} px)\n'
             f'<0: {n_blue}  >2: {n_yellow}  >5: {n_red}',
             fontsize=10,
         )
@@ -558,13 +567,36 @@ def build_app(data_h5: str | None = None,
         img_fig.xaxis.axis_label = 'column (px)'
         img_fig.yaxis.axis_label = 'row (px)'
 
+        # Pixel-level intensity overlay (RGBA, drawn on top of canvas image)
+        overlay_src = ColumnDataSource(dict(
+            image=[np.zeros((H, W), dtype=np.uint32)],
+            x=[0], y=[0], dw=[W], dh=[H],
+        ))
+        img_fig.image_rgba(
+            image='image', source=overlay_src,
+            x='x', y='y', dw='dw', dh='dh',
+        )
+
+        def _refresh_overlay() -> None:
+            sb, sy, sr = ck_blue.value, ck_yellow.value, ck_red.value
+            Hc, Wc = _state['H'], _state['W']
+            if not (sb or sy or sr):
+                overlay_src.data = dict(
+                    image=[np.zeros((Hc, Wc), dtype=np.uint32)],
+                    x=[0], y=[0], dw=[Wc], dh=[Hc],
+                )
+                return
+            arr = _get_canvas(_state['group'])
+            overlay_src.data = dict(
+                image=[_make_pixel_overlay(arr, sb, sy, sr)],
+                x=[0], y=[0], dw=[arr.shape[1]], dh=[arr.shape[0]],
+            )
+
         # Helper: build rect data for a group (in Bokeh flipped-y coordinates)
         def _rects_for_group(group_key: str, img_H: int) -> dict:
             mask = df[pg_col].astype(str) == group_key
             sub  = df[mask]
             xs, ys, ws, hs, cols, idxs = [], [], [], [], [], []
-            sb, sy, sr = ck_blue.value, ck_yellow.value, ck_red.value
-            any_ck = sb or sy or sr
             for i, row in sub.iterrows():
                 cx = row.get('canvas_cx', np.nan)
                 cy = row.get('canvas_cy', np.nan)
@@ -576,17 +608,9 @@ def build_app(data_h5: str | None = None,
                 ys.append((img_H - float(cy)) * image_scale)
                 ws.append(float(ps) * image_scale)
                 hs.append(float(ps) * image_scale)
-                fa_col = _label_color(str(row.get('fa_pred', '')), FA_COLOR_MAP)
-                if any_ck:
-                    mi = float(patch_max[i]) if i < len(patch_max) else 0.0
-                    cols.append(_intensity_color(mi, sb, sy, sr, fallback=fa_col))
-                else:
-                    cols.append(fa_col)
+                cols.append(_label_color(str(row.get('fa_pred', '')), FA_COLOR_MAP))
                 idxs.append(i)
             return dict(x=xs, y=ys, width=ws, height=hs, color=cols, df_idx=idxs)
-
-        def _refresh_colors() -> None:
-            rects_src.data = _rects_for_group(_state['group'], _state['H'])
 
         _state.update(group=init_group, H=H, W=W)
         rects_src.data = _rects_for_group(init_group, H)
@@ -604,6 +628,7 @@ def build_app(data_h5: str | None = None,
             sel_src.data   = dict(x=[], y=[], width=[], height=[])
             highlight_src.data = dict(x=[], y=[])
             _state.update(group=group_key, H=Hn, W=Wn)
+            _refresh_overlay()
 
         img_select_widget = pn.widgets.Select(
             name='Image', options=img_options,
@@ -612,9 +637,9 @@ def build_app(data_h5: str | None = None,
         img_select_widget.param.watch(lambda e: _load_group(e.new), 'value')
         img_pane = pn.pane.Bokeh(img_fig)
 
-        ck_blue.param.watch(lambda _: _refresh_colors(), 'value')
-        ck_yellow.param.watch(lambda _: _refresh_colors(), 'value')
-        ck_red.param.watch(lambda _: _refresh_colors(), 'value')
+        ck_blue.param.watch(lambda _: _refresh_overlay(), 'value')
+        ck_yellow.param.watch(lambda _: _refresh_overlay(), 'value')
+        ck_red.param.watch(lambda _: _refresh_overlay(), 'value')
 
     # ── Shared detail panel (bottom bar) ──────────────────────────────────────
     pred_md   = pn.pane.HTML(
