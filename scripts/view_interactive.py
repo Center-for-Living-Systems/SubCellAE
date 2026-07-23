@@ -239,9 +239,13 @@ def _fig_to_pane(fig: plt.Figure, dpi: int = 130) -> pn.pane.PNG:
     return pn.pane.PNG(buf, sizing_mode='scale_width')
 
 
-def _patch_figure(raw: np.ndarray, recon: np.ndarray, title: str = '') -> pn.pane.PNG:
-    fig, axes = plt.subplots(1, 2, figsize=(5, 2.6))
-    for ax, arr, lbl in zip(axes, [raw, recon], ['Raw', 'Recon']):
+def _patch_figure(raw: np.ndarray, recon: np.ndarray | None = None,
+                  title: str = '') -> pn.pane.PNG:
+    panels = [('Raw', raw)] + ([('Recon', recon)] if recon is not None else [])
+    fig, axes = plt.subplots(1, len(panels), figsize=(2.6 * len(panels), 2.6))
+    if len(panels) == 1:
+        axes = [axes]
+    for ax, (lbl, arr) in zip(axes, panels):
         ax.imshow(arr, cmap='gray', vmin=0, vmax=1, interpolation='nearest')
         ax.set_title(lbl, fontsize=10)
         ax.axis('off')
@@ -639,8 +643,9 @@ def build_app(data_h5: str | None = None,
             f'</div>'
         )
         if patches_raw is not None:
+            recon_arr = patches_recon[idx] if patches_recon is not None else None
             patch_col.objects = [_patch_figure(
-                patches_raw[idx], patches_recon[idx],
+                patches_raw[idx], recon_arr,
                 title=Path(fname).stem,
             )]
         elif has_old_patches:
