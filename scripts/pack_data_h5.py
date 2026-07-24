@@ -95,9 +95,13 @@ def _load_frames(frame_dir: Path, cond: str, frame_indices: list[int],
     return result
 
 
-def pack_dataset(ds: str, conditions: list[str], norm: str = "cio") -> Path | None:
-    patches_root = DATA_ROOT / f"ae_results/patches/{norm}"
-    frames_root  = DATA_ROOT / f"ae_results/source_frames/{norm}"
+def pack_dataset(ds: str, conditions: list[str], norm: str = "cio",
+                 patches_root: Path | None = None,
+                 frames_root:  Path | None = None) -> Path | None:
+    if patches_root is None:
+        patches_root = DATA_ROOT / f"ae_results/patches/{norm}"
+    if frames_root is None:
+        frames_root = DATA_ROOT / f"ae_results/source_frames/{norm}"
     out_dir  = patches_root / ds
     out_path = out_dir / "data.h5"
 
@@ -256,12 +260,21 @@ def main():
                     choices=ALL_CONDITIONS, metavar="COND")
     ap.add_argument("--norm", default="cio", choices=ALL_NORMS,
                     help="Normalisation variant to pack (default: cio)")
+    ap.add_argument("--patches-root", default=None, metavar="PATH",
+                    help="Override patches root dir (default: DATA_ROOT/ae_results/patches/{norm})")
+    ap.add_argument("--frames-root", default=None, metavar="PATH",
+                    help="Override frames root dir (default: DATA_ROOT/ae_results/source_frames/{norm})")
     args = ap.parse_args()
 
+    pr = Path(args.patches_root) if args.patches_root else None
+    fr = Path(args.frames_root)  if args.frames_root  else None
+
     print(f"Packing data.h5 [{args.norm}] for {args.datasets} × {args.conditions}\n", flush=True)
+    if pr: print(f"  patches-root: {pr}")
+    if fr: print(f"  frames-root : {fr}")
     for ds in args.datasets:
         print(f"=== {ds} ===", flush=True)
-        pack_dataset(ds, args.conditions, norm=args.norm)
+        pack_dataset(ds, args.conditions, norm=args.norm, patches_root=pr, frames_root=fr)
 
     print("\nAll done.", flush=True)
 

@@ -28,6 +28,7 @@ preprocessing:
 
 normalization:
   norm_mode : "cell_insideoutside"
+  norm_cell_scale : 5.0
 
 segmentation:
   seg_ch                  : 1
