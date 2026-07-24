@@ -266,6 +266,14 @@ def _fig_to_pane(fig: plt.Figure, dpi: int = 130) -> pn.pane.PNG:
     return pn.pane.PNG(buf, sizing_mode='scale_width')
 
 
+# patches/raw and patches/recon are packed with norm_cell_scale=5.0 (patchprep
+# default) while the full canvas frames use scale=1.0 (frameextract *_cio.yaml
+# configs) — same CIO normalisation, 5x different divisor. The >2/>5/<0
+# thresholds are calibrated against the canvas (scale=1) values, so patch
+# arrays need this correction before threshold comparison to match.
+_PATCH_OVERLAY_SCALE_FIX = 5.0
+
+
 def _patch_figure(raw: np.ndarray, recon: np.ndarray | None = None,
                   title: str = '',
                   show_blue: bool = False, show_yellow: bool = False,
@@ -275,8 +283,11 @@ def _patch_figure(raw: np.ndarray, recon: np.ndarray | None = None,
     if len(panels) == 1:
         axes = [axes]
     for ax, (lbl, arr) in zip(axes, panels):
-        ax.imshow(arr, cmap='gray', vmin=0, vmax=1, interpolation='nearest')
-        ov = _patch_intensity_overlay(arr, show_blue, show_yellow, show_red)
+        # /2 here + /10 on the canvas (below) both land on true_value/10, closing the
+        # 5x packer gap above until the frameextract/patchprep configs are realigned.
+        ax.imshow(arr / 2.0, cmap='gray', vmin=-0.01, vmax=1, interpolation='nearest')
+        ov = _patch_intensity_overlay(arr * _PATCH_OVERLAY_SCALE_FIX,
+                                      show_blue, show_yellow, show_red)
         if ov is not None:
             ax.imshow(ov, interpolation='nearest')
         ax.set_title(lbl, fontsize=10)
@@ -551,8 +562,11 @@ def build_app(data_h5: str | None = None,
         H, W       = init_arr.shape[:2]
 
         # Image data source
+        # /10 here (see matching /2 on patch display in _patch_figure) is an interim
+        # display-only fix for the 5x packer scale gap between images/raw (scale=1)
+        # and patches/raw (scale=5) — see _PATCH_OVERLAY_SCALE_FIX above.
         img_src = ColumnDataSource(dict(
-            image=[_flip_for_bokeh(init_arr)],
+            image=[_flip_for_bokeh(init_arr / 10.0)],
             x=[0], y=[0], dw=[W], dh=[H],
         ))
 
@@ -572,7 +586,7 @@ def build_app(data_h5: str | None = None,
             tools='tap,pan,wheel_zoom,reset',
             toolbar_location='above',
         )
-        gray_mapper = LinearColorMapper(palette=GRAY256, low=0.0, high=1.0)
+        gray_mapper = LinearColorMapper(palette=GRAY256, low=-0.01, high=1.0)
         img_fig.image(
             image='image', source=img_src,
             x=0, y=0, dw=W, dh=H,
@@ -655,7 +669,7 @@ def build_app(data_h5: str | None = None,
             arr     = _get_canvas(group_key)
             Hn, Wn  = arr.shape[:2]
             img_src.data = dict(
-                image=[_flip_for_bokeh(arr)],
+                image=[_flip_for_bokeh(arr / 10.0)],
                 x=[0], y=[0], dw=[Wn], dh=[Hn],
             )
             img_fig.x_range.start, img_fig.x_range.end = 0, Wn
