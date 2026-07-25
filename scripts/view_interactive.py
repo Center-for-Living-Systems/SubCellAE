@@ -63,6 +63,13 @@ from subcellae.utils.label_colors import (
 )
 FALLBACK = "#cccccc"
 
+_CH_IDX   = {'pax': 1, 'zyx': 2, 'act': 3, 'vinc': 0, 'ppax': 0, 'pfak': 0}
+_CH_SHORT  = {'pax': 'pax', 'zyx': 'zyxin', 'act': 'actin',
+               'vinc': 'vinc', 'ppax': 'ppax', 'pfak': 'pfak'}
+
+def _ch_label(key: str) -> str:
+    return f'{_CH_SHORT.get(key, key)}-ch{_CH_IDX.get(key, "?")}'
+
 # Grayscale palette: index 0 → black, index 255 → white
 try:
     from bokeh.palettes import gray as _bk_gray
@@ -73,6 +80,13 @@ except Exception:
 
 def _label_color(label: str, color_map: dict) -> str:
     return color_map.get(str(label), FALLBACK)
+
+
+def _max_intensity_color(v: float) -> tuple[str, float, float]:
+    """Return (color, line_width, line_alpha) for a patch rect border."""
+    if v > 4:  return '#FF4444', 1.5, 1.0   # red, thicker
+    if v > 2:  return '#FF44FF', 0.5, 0.85  # magenta, thin
+    return '#000000', 0.0, 0.0              # not shown
 
 
 # ── HDF5 loading ──────────────────────────────────────────────────────────────
@@ -101,8 +115,10 @@ def _read_h5_model(path: str):
 def _read_h5_data(path: str):
     """Load dataset-side data from a data.h5 (patches + images, no model outputs).
 
-    Returns (df_data, patches_raw, images_raw, img_meta, pad, scale).
+    Returns (df_data, patches_raw, images_raw, img_meta, pad, scale,
+             extra_ch_images, ch_keys).
     """
+    import json as _json
     with h5py.File(path, 'r') as f:
         df_data     = pd.read_csv(io.StringIO(f['meta/csv'][()].decode()))
         patches_raw = f['patches/raw'][()] if 'patches/raw' in f else None
@@ -111,7 +127,14 @@ def _read_h5_data(path: str):
                        if 'images/meta' in f else None)
         pad_size    = float(f.attrs.get('pad_size', 64))
         image_scale = float(f.attrs.get('image_scale', 1.0))
-    return df_data, patches_raw, images_raw, img_meta, pad_size, image_scale
+        ch_keys_raw = f.attrs.get('channels', '["pax"]')
+        ch_keys: list[str] = _json.loads(ch_keys_raw) if isinstance(ch_keys_raw, str) else list(ch_keys_raw)
+        extra_ch_images: dict[str, np.ndarray] = {}
+        for k in ch_keys[1:]:  # skip first (pax = images/raw)
+            dsk = f'images/{k}'
+            if dsk in f:
+                extra_ch_images[k] = f[dsk][()]
+    return df_data, patches_raw, images_raw, img_meta, pad_size, image_scale, extra_ch_images, ch_keys
 
 
 def load_sources(data_h5: str | None, model_h5: str | None):
@@ -132,7 +155,7 @@ def load_sources(data_h5: str | None, model_h5: str | None):
         print(f'[view] model : {model_h5}')
         df_model, pr_model, patches_recon, im_model, imm_model, pad_m, scale_m, result_dir, plots = \
             _read_h5_model(model_h5)
-        df_data, pr_data, im_data, imm_data, pad_d, scale_d = \
+        df_data, pr_data, im_data, imm_data, pad_d, scale_d, extra_ch_images, ch_keys = \
             _read_h5_data(data_h5)
 
         # Prefer data.h5 for images (higher quality / all conditions)
@@ -163,16 +186,17 @@ def load_sources(data_h5: str | None, model_h5: str | None):
         else:
             patches_raw = pr_model
 
-        return df, patches_raw, patches_recon, images_raw, img_meta, pad_size, image_scale, result_dir, plots
+        return df, patches_raw, patches_recon, images_raw, img_meta, pad_size, image_scale, result_dir, plots, extra_ch_images, ch_keys
 
     elif model_h5:
         print(f'[view] Loading (single-file) {model_h5}')
-        return _read_h5_model(model_h5)
+        nine = _read_h5_model(model_h5)
+        return nine + ({}, ['pax'])
 
     elif data_h5:
         print(f'[view] Loading (data-only) {data_h5}')
-        df_data, patches_raw, images_raw, img_meta, pad_size, image_scale = _read_h5_data(data_h5)
-        return df_data, patches_raw, None, images_raw, img_meta, pad_size, image_scale, Path(''), {}
+        df_data, patches_raw, images_raw, img_meta, pad_size, image_scale, extra_ch_images, ch_keys = _read_h5_data(data_h5)
+        return df_data, patches_raw, None, images_raw, img_meta, pad_size, image_scale, Path(''), {}, extra_ch_images, ch_keys
 
     else:
         raise ValueError('At least one H5 path is required.')
@@ -192,41 +216,6 @@ def _norm_image(arr: np.ndarray) -> np.ndarray:
     return arr.astype(np.float32)
 
 
-def _make_pixel_overlay(arr: np.ndarray, patch_mask: np.ndarray,
-                        show_blue: bool, show_yellow: bool, show_red: bool) -> np.ndarray:
-    """Return a (H, W) uint32 RGBA array for Bokeh image_rgba (y-flipped).
-
-    Only pixels where patch_mask is True are considered.
-    Encoding: R | G<<8 | B<<16 | A<<24  (little-endian, α=160).
-      Blue   #4488FF : pixels < 0
-      Yellow #FFCC00 : pixels in (2, 5]
-      Red    #FF4444 : pixels > 5
-    """
-    H, W = arr.shape[:2]
-    rgba = np.zeros((H, W, 4), dtype=np.uint8)
-    if show_blue:
-        rgba[patch_mask & (arr < 0)] = [0x44, 0x88, 0xFF, 160]
-    if show_yellow:
-        rgba[patch_mask & (arr > 2) & (arr <= 5)] = [0xFF, 0xCC, 0x00, 160]
-    if show_red:
-        rgba[patch_mask & (arr > 5)] = [0xFF, 0x44, 0x44, 160]
-    packed = np.ascontiguousarray(rgba).view(np.uint32).reshape(H, W)
-    return np.ascontiguousarray(np.flipud(packed))
-
-
-def _patch_intensity_overlay(arr: np.ndarray, show_blue: bool,
-                              show_yellow: bool, show_red: bool) -> np.ndarray | None:
-    """Return float32 RGBA (H, W, 4) overlay for matplotlib imshow, or None."""
-    if not (show_blue or show_yellow or show_red):
-        return None
-    ov = np.zeros((*arr.shape[:2], 4), dtype=np.float32)
-    if show_blue:
-        ov[arr < 0]                = [0x44/255, 0x88/255, 1.0,      160/255]
-    if show_yellow:
-        ov[(arr > 2) & (arr <= 5)] = [1.0,      0xCC/255, 0.0,      160/255]
-    if show_red:
-        ov[arr > 5]                = [1.0,      0x44/255, 0x44/255, 160/255]
-    return ov
 
 
 def _flip_for_bokeh(arr: np.ndarray) -> np.ndarray:
@@ -266,30 +255,14 @@ def _fig_to_pane(fig: plt.Figure, dpi: int = 130) -> pn.pane.PNG:
     return pn.pane.PNG(buf, sizing_mode='scale_width')
 
 
-# patches/raw and patches/recon are packed with norm_cell_scale=5.0 (patchprep
-# default) while the full canvas frames use scale=1.0 (frameextract *_cio.yaml
-# configs) — same CIO normalisation, 5x different divisor. The >2/>5/<0
-# thresholds are calibrated against the canvas (scale=1) values, so patch
-# arrays need this correction before threshold comparison to match.
-_PATCH_OVERLAY_SCALE_FIX = 5.0
-
-
 def _patch_figure(raw: np.ndarray, recon: np.ndarray | None = None,
-                  title: str = '',
-                  show_blue: bool = False, show_yellow: bool = False,
-                  show_red: bool = False) -> pn.pane.PNG:
+                  title: str = '', vmax: float = 1.0) -> pn.pane.PNG:
     panels = [('Raw', raw)] + ([('Recon', recon)] if recon is not None else [])
     fig, axes = plt.subplots(1, len(panels), figsize=(2.6 * len(panels), 2.6))
     if len(panels) == 1:
         axes = [axes]
     for ax, (lbl, arr) in zip(axes, panels):
-        # /2 here + /10 on the canvas (below) both land on true_value/10, closing the
-        # 5x packer gap above until the frameextract/patchprep configs are realigned.
-        ax.imshow(arr / 2.0, cmap='gray', vmin=-0.01, vmax=1, interpolation='nearest')
-        ov = _patch_intensity_overlay(arr * _PATCH_OVERLAY_SCALE_FIX,
-                                      show_blue, show_yellow, show_red)
-        if ov is not None:
-            ax.imshow(ov, interpolation='nearest')
+        ax.imshow(arr, cmap='gray', vmin=0, vmax=vmax, interpolation='nearest')
         ax.set_title(lbl, fontsize=10)
         ax.axis('off')
     if title:
@@ -326,10 +299,27 @@ def _legend_html() -> str:
 def build_app(data_h5: str | None = None,
               model_h5: str | None = None) -> pn.viewable.Viewable:
     (df, patches_raw, patches_recon,
-     images_raw, img_meta, pad_size, image_scale, result_dir, plots) = \
-        load_sources(data_h5, model_h5)
+     images_raw, img_meta, pad_size, image_scale, result_dir, plots,
+     extra_ch_images, ch_keys) = load_sources(data_h5, model_h5)
     n = len(df)
+
+    pax_key   = ch_keys[0] if ch_keys else 'pax'
+    pax_label = _ch_label(pax_key)
     print(f'[view]   {n} patches, image_scale={image_scale}')
+    patch_maxes: np.ndarray | None = (
+        patches_raw.max(axis=(1, 2)) if patches_raw is not None else None
+    )
+    patch_l1s: np.ndarray | None = (
+        np.abs(patches_raw).mean(axis=(1, 2)).astype(np.float32)
+        if patches_raw is not None else None
+    )
+    if patch_l1s is not None:
+        _l1_sorted = np.sort(patch_l1s)
+        _l1_pcts   = {p: float(np.percentile(patch_l1s, p))
+                      for p in [10, 25, 50, 75, 90]}
+    else:
+        _l1_sorted = None
+        _l1_pcts   = None
 
 
     # ── Old-format fallback: individual TIFF files on disk ────────────────────
@@ -390,17 +380,19 @@ def build_app(data_h5: str | None = None,
                    if patches_raw is not None else np.zeros(0, dtype=np.float32))
         fig_hist, ax = plt.subplots(figsize=(5.2, 5.0))
         ax.hist(px_vals, bins=200, color='#888888', alpha=0.75, density=True)
-        ax.axvline(0, color='#4488FF', lw=1.6, ls='--', label='< 0')
-        ax.axvline(2, color='#FFCC00', lw=1.6, ls='--', label='> 2')
-        ax.axvline(5, color='#FF4444', lw=1.6, ls='--', label='> 5')
+        ax.axvline(0, color='#4488FF', lw=1.6, ls='--', label='< 0  (blue)')
+        ax.axvline(1, color='#009944', lw=1.6, ls='--', label='> 1  (dark green)')
+        ax.axvline(2, color='#FF44FF', lw=1.6, ls='--', label='> 2  (magenta)')
+        ax.axvline(4, color='#FF4444', lw=1.6, ls='--', label='> 4  (red)')
         ax.set_xlabel('pixel intensity')
         ax.set_ylabel('density')
-        n_blue   = int((px_vals < 0).sum())
-        n_yellow = int((px_vals > 2).sum())
-        n_red    = int((px_vals > 5).sum())
+        n_blue    = int((px_vals < 0).sum())
+        n_green   = int((px_vals > 1).sum())
+        n_magenta = int((px_vals > 2).sum())
+        n_red     = int((px_vals > 4).sum())
         ax.set_title(
             f'All patches  N={n}  ({len(px_vals):,} px)\n'
-            f'<0: {n_blue}  >2: {n_yellow}  >5: {n_red}',
+            f'<0: {n_blue}  >1: {n_green}  >2: {n_magenta}  >4: {n_red}',
             fontsize=10,
         )
         ax.legend(fontsize=9)
@@ -439,8 +431,26 @@ def build_app(data_h5: str | None = None,
 
         umap_src = ColumnDataSource(umap_data)
 
-        # Single big red dot on UMAP -- updated when user clicks the image panel
-        highlight_src = ColumnDataSource({'x': [], 'y': []})
+        # UMAP filter toggle
+        umap_filter = pn.widgets.RadioButtonGroup(
+            options=['All patches', 'Labeled only'], value='All patches', width=230,
+        )
+        _umap_all_data = {k: np.array(v) for k, v in umap_data.items()}
+        if 'annotation_label' in df.columns:
+            labeled_mask = df['annotation_label'].fillna(-1).values >= 0
+        else:
+            labeled_mask = np.ones(n, dtype=bool)
+        _umap_labeled_data = {k: v[labeled_mask] for k, v in _umap_all_data.items()}
+
+        def _on_umap_filter(event):
+            if event.new == 'Labeled only':
+                umap_src.data = dict(_umap_labeled_data)
+            else:
+                umap_src.data = dict(_umap_all_data)
+        umap_filter.param.watch(_on_umap_filter, 'value')
+
+        # Single big dot on UMAP -- updated when user clicks the image panel
+        highlight_src = ColumnDataSource({'x': [], 'y': [], 'color': []})
 
         # ── UMAP scatter figure ───────────────────────────────────────────────
         p_umap = figure(
@@ -460,10 +470,10 @@ def build_app(data_h5: str | None = None,
             selection_line_width=1.5,
         )
 
-        # Highlighted point (from image click) -- drawn on top as a large red dot
+        # Highlighted point (from image click) -- drawn on top with label color
         p_umap.scatter(
             'x', 'y', source=highlight_src, marker='circle',
-            fill_color='red', line_color='white',
+            fill_color='color', line_color='white',
             size=18, alpha=1.0, line_width=2.5,
         )
 
@@ -514,13 +524,15 @@ def build_app(data_h5: str | None = None,
                 + '  (hover = patch tooltip  |  tap = detail panel)';
         """))
 
-        left_col = pn.pane.Bokeh(bk_column(color_select, p_umap))
+        left_col = pn.Column(
+            pn.Row(pn.pane.Bokeh(color_select), umap_filter),
+            pn.pane.Bokeh(p_umap),
+            width=540,
+        )
     # end if/else data_only
 
     # ── Outlier highlight checkboxes (shared with canvas and detail panel) ───────
-    ck_blue   = pn.widgets.Checkbox(name="< 0  (blue)",   value=False)
-    ck_yellow = pn.widgets.Checkbox(name="> 2  (yellow)", value=False)
-    ck_red    = pn.widgets.Checkbox(name="> 5  (red)",    value=False)
+    dim_toggle = pn.widgets.Toggle(name='Dim  (vmax=2)', value=False, width=110)
     _last_detail_idx: list[int | None] = [None]  # tracks last patch shown in detail
 
     # ── Full image Bokeh figure (Direction B) ─────────────────────────────────
@@ -529,6 +541,12 @@ def build_app(data_h5: str | None = None,
     # Placeholders updated inside the has_images block
     rects_src = sel_src = img_fig = img_pane = img_select_widget = None
     _state: dict = {}
+
+    # Extra channel collections (populated inside has_images block if applicable)
+    extra_ch_figs: dict = {}
+    extra_ch_srcs: dict = {}
+    extra_ch_mappers: list = []
+    extra_ch_panes: list = []
 
     if has_images:
         # Build selector options: "condition | group_key"
@@ -541,8 +559,13 @@ def build_app(data_h5: str | None = None,
         if images_raw is not None and img_meta is not None:
             # Packed format: images stored in HDF5 array
             unique_groups = sorted(img_meta['group'].astype(str).unique())
-            def _get_canvas(group_key: str) -> np.ndarray:
-                return _norm_image(_get_frame(images_raw, img_meta, group_key))
+            _unique_groups_set = set(unique_groups)
+            def _get_canvas(group_key: str) -> np.ndarray | None:
+                frame = _get_frame(images_raw, img_meta, group_key)
+                if frame is None:
+                    print(f'[view] WARN: no image for group {group_key!r}', flush=True)
+                    return None
+                return _norm_image(frame)
         else:
             # Old-format: individual TIFFs on disk (raw_{group_key}.tif)
             unique_groups = sorted(p.stem[4:] for p in old_img_files)  # strip 'raw_'
@@ -554,25 +577,27 @@ def build_app(data_h5: str | None = None,
                 mx = arr.max()
                 return arr / mx if mx > 0 else arr
 
+        if '_unique_groups_set' not in dir():
+            _unique_groups_set = set(unique_groups)
+
         img_options = {f"{grp_to_cond.get(g, '?')} | {g}": g
                        for g in unique_groups}
 
         init_group = unique_groups[0]
         init_arr   = _get_canvas(init_group)
+        if init_arr is None:
+            raise RuntimeError(f'Cannot load initial canvas for group {init_group!r}')
         H, W       = init_arr.shape[:2]
 
         # Image data source
-        # /10 here (see matching /2 on patch display in _patch_figure) is an interim
-        # display-only fix for the 5x packer scale gap between images/raw (scale=1)
-        # and patches/raw (scale=5) — see _PATCH_OVERLAY_SCALE_FIX above.
         img_src = ColumnDataSource(dict(
-            image=[_flip_for_bokeh(init_arr / 10.0)],
+            image=[_flip_for_bokeh(init_arr)],
             x=[0], y=[0], dw=[W], dh=[H],
         ))
 
-        # Patch rectangle source (coloured by FA prediction)
+        # Patch rectangle source (coloured by patch max intensity)
         rects_src = ColumnDataSource(dict(
-            x=[], y=[], width=[], height=[], color=[], df_idx=[],
+            x=[], y=[], width=[], height=[], color=[], lw=[], la=[], df_idx=[],
         ))
         # Selected-patch white-border highlight
         sel_src = ColumnDataSource(dict(x=[], y=[], width=[], height=[]))
@@ -582,71 +607,40 @@ def build_app(data_h5: str | None = None,
             width=520, height=520,
             x_range=Range1d(0, W),
             y_range=Range1d(0, H),
-            title='Full paxillin canvas  (click a patch to highlight on UMAP)',
+            title=f'{pax_label}  (click a patch to highlight on UMAP)',
             tools='tap,pan,wheel_zoom,reset',
             toolbar_location='above',
         )
         gray_mapper = LinearColorMapper(palette=GRAY256, low=-0.01, high=1.0)
-        img_fig.image(
+        _img_r = img_fig.image(
             image='image', source=img_src,
             x=0, y=0, dw=W, dh=H,
             color_mapper=gray_mapper,
         )
+        _img_r.nonselection_glyph.global_alpha = 1.0
+        def _on_dim_toggle(e):
+            setattr(gray_mapper, 'high', 2.0 if e.new else 1.0)
+            for _m in extra_ch_mappers:
+                setattr(_m, 'high', 2.0 if e.new else 1.0)
+        dim_toggle.param.watch(_on_dim_toggle, 'value')
         img_fig.rect(
             'x', 'y', 'width', 'height', source=rects_src,
-            fill_alpha=0, line_color='color', line_width=0.9, line_alpha=0.75,
+            fill_alpha=0, line_color='color', line_width='lw', line_alpha='la',
+            nonselection_fill_alpha=0, nonselection_line_alpha='la',
         )
         img_fig.rect(
             'x', 'y', 'width', 'height', source=sel_src,
             fill_alpha=0, line_color='white', line_width=2.5,
+            nonselection_fill_alpha=0, nonselection_line_alpha=1.0,
         )
         img_fig.xaxis.axis_label = 'column (px)'
         img_fig.yaxis.axis_label = 'row (px)'
-
-        # Pixel-level intensity overlay (RGBA, drawn on top of canvas image)
-        overlay_src = ColumnDataSource(dict(
-            image=[np.zeros((H, W), dtype=np.uint32)],
-            x=[0], y=[0], dw=[W], dh=[H],
-        ))
-        img_fig.image_rgba(
-            image='image', source=overlay_src,
-            x='x', y='y', dw='dw', dh='dh',
-        )
-
-        def _refresh_overlay() -> None:
-            sb, sy, sr = ck_blue.value, ck_yellow.value, ck_red.value
-            Hc, Wc = _state['H'], _state['W']
-            if not (sb or sy or sr):
-                overlay_src.data = dict(
-                    image=[np.zeros((Hc, Wc), dtype=np.uint32)],
-                    x=[0], y=[0], dw=[Wc], dh=[Hc],
-                )
-                return
-            arr = _get_canvas(_state['group'])
-            H, W = arr.shape[:2]
-            # Build mask: True only within each patch's bounding box
-            mask = np.zeros((H, W), dtype=bool)
-            sub = df[df[pg_col].astype(str) == _state['group']]
-            for _, row in sub.iterrows():
-                cx = row.get('canvas_cx', np.nan)
-                cy = row.get('canvas_cy', np.nan)
-                ps = int(row.get('ps', 32))
-                if pd.isna(cx) or pd.isna(cy):
-                    continue
-                half = ps // 2
-                r0, r1 = max(0, int(cy) - half), min(H, int(cy) + half)
-                c0, c1 = max(0, int(cx) - half), min(W, int(cx) + half)
-                mask[r0:r1, c0:c1] = True
-            overlay_src.data = dict(
-                image=[_make_pixel_overlay(arr, mask, sb, sy, sr)],
-                x=[0], y=[0], dw=[W], dh=[H],
-            )
 
         # Helper: build rect data for a group (in Bokeh flipped-y coordinates)
         def _rects_for_group(group_key: str, img_H: int) -> dict:
             mask = df[pg_col].astype(str) == group_key
             sub  = df[mask]
-            xs, ys, ws, hs, cols, idxs = [], [], [], [], [], []
+            xs, ys, ws, hs, cols, lws, las, idxs = [], [], [], [], [], [], [], []
             for i, row in sub.iterrows():
                 cx = row.get('canvas_cx', np.nan)
                 cy = row.get('canvas_cy', np.nan)
@@ -658,27 +652,46 @@ def build_app(data_h5: str | None = None,
                 ys.append((img_H - float(cy)) * image_scale)
                 ws.append(float(ps) * image_scale)
                 hs.append(float(ps) * image_scale)
-                cols.append(_label_color(str(row.get('fa_pred', '')), FA_COLOR_MAP))
+                if patch_maxes is not None:
+                    col, lw, la = _max_intensity_color(float(patch_maxes[i]))
+                else:
+                    col, lw, la = _label_color(str(row.get('fa_pred', '')), FA_COLOR_MAP), 0.5, 0.75
+                cols.append(col)
+                lws.append(lw)
+                las.append(la)
                 idxs.append(i)
-            return dict(x=xs, y=ys, width=ws, height=hs, color=cols, df_idx=idxs)
+            return dict(x=xs, y=ys, width=ws, height=hs, color=cols, lw=lws, la=las, df_idx=idxs)
 
         _state.update(group=init_group, H=H, W=W)
         rects_src.data = _rects_for_group(init_group, H)
 
         def _load_group(group_key: str) -> None:
-            arr     = _get_canvas(group_key)
+            arr = _get_canvas(group_key)
+            if arr is None:
+                print(f'[view] WARN: skipping _load_group for missing group {group_key!r}', flush=True)
+                return
             Hn, Wn  = arr.shape[:2]
             img_src.data = dict(
-                image=[_flip_for_bokeh(arr / 10.0)],
+                image=[_flip_for_bokeh(arr)],
                 x=[0], y=[0], dw=[Wn], dh=[Hn],
             )
             img_fig.x_range.start, img_fig.x_range.end = 0, Wn
             img_fig.y_range.start, img_fig.y_range.end = 0, Hn
             rects_src.data = _rects_for_group(group_key, Hn)
             sel_src.data   = dict(x=[], y=[], width=[], height=[])
-            highlight_src.data = dict(x=[], y=[])
+            highlight_src.data = dict(x=[], y=[], color=[])
             _state.update(group=group_key, H=Hn, W=Wn)
-            _refresh_overlay()
+            # Update extra channel canvases
+            if extra_ch_images and img_meta is not None:
+                grp_meta = img_meta[img_meta['group'].astype(str) == group_key]
+                if not grp_meta.empty:
+                    fr = int(grp_meta.iloc[0]['frame'])
+                    for k, ch_src in extra_ch_srcs.items():
+                        ch_arr = _norm_image(extra_ch_images[k][fr])
+                        ch_src.data = dict(
+                            image=[_flip_for_bokeh(ch_arr)],
+                            x=[0], y=[0], dw=[Wn], dh=[Hn],
+                        )
 
         img_select_widget = pn.widgets.Select(
             name='Image', options=img_options,
@@ -687,9 +700,40 @@ def build_app(data_h5: str | None = None,
         img_select_widget.param.watch(lambda e: _load_group(e.new), 'value')
         img_pane = pn.pane.Bokeh(img_fig)
 
-        ck_blue.param.watch(lambda _: _refresh_overlay(), 'value')
-        ck_yellow.param.watch(lambda _: _refresh_overlay(), 'value')
-        ck_red.param.watch(lambda _: _refresh_overlay(), 'value')
+        # ── Extra channel Bokeh canvases ──────────────────────────────────────
+        if extra_ch_images and img_meta is not None:
+            init_grp_meta = img_meta[img_meta['group'].astype(str) == init_group]
+            init_frame_row = int(init_grp_meta.iloc[0]['frame']) if not init_grp_meta.empty else 0
+            for k, ch_frames in extra_ch_images.items():
+                init_ch_arr = _norm_image(ch_frames[init_frame_row])
+                ch_src = ColumnDataSource(dict(
+                    image=[_flip_for_bokeh(init_ch_arr)],
+                    x=[0], y=[0], dw=[W], dh=[H],
+                ))
+                ch_mapper = LinearColorMapper(palette=GRAY256, low=-0.01, high=1.0)
+                ch_fig = figure(
+                    width=340, height=340,
+                    x_range=img_fig.x_range,
+                    y_range=img_fig.y_range,
+                    title=_ch_label(k),
+                    tools='pan,wheel_zoom,reset',
+                    toolbar_location='above',
+                )
+                _r = ch_fig.image(
+                    image='image', source=ch_src,
+                    x=0, y=0, dw=W, dh=H,
+                    color_mapper=ch_mapper,
+                )
+                _r.nonselection_glyph.global_alpha = 1.0
+                ch_fig.rect(
+                    'x', 'y', 'width', 'height', source=sel_src,
+                    fill_alpha=0, line_color='white', line_width=2.5,
+                    nonselection_fill_alpha=0, nonselection_line_alpha=1.0,
+                )
+                extra_ch_figs[k] = ch_fig
+                extra_ch_srcs[k] = ch_src
+                extra_ch_mappers.append(ch_mapper)
+                extra_ch_panes.append(pn.pane.Bokeh(ch_fig))
 
     # ── Shared detail panel (bottom bar) ──────────────────────────────────────
     pred_md   = pn.pane.HTML(
@@ -697,7 +741,8 @@ def build_app(data_h5: str | None = None,
         'Tap the UMAP or click a patch in the canvas for full details.</i>',
         width=300,
     )
-    patch_col = pn.Column(pn.pane.Markdown(''), width=300)
+    patch_col     = pn.Column(pn.pane.Markdown(''), width=300)
+    side_patch_col = pn.Column(width=165)
 
     def _show_detail(idx: int) -> None:
         _last_detail_idx[0] = idx
@@ -708,11 +753,29 @@ def build_app(data_h5: str | None = None,
         cond  = str(row.get('condition_name', row.get('condition', '')))
         fa_color  = FA_COLOR_MAP.get(fa,  FALLBACK)
         pos_color = POS_COLOR_MAP.get(pos, FALLBACK)
+        if patch_l1s is not None:
+            l1_val = float(patch_l1s[idx])
+            l1_pct = float(np.searchsorted(_l1_sorted, l1_val) / len(_l1_sorted) * 100)
+            l1_line = (
+                f'<b>L1:</b> {l1_val:.4f}'
+                f'<span style="color:#888;font-size:11px;">'
+                f'  →  <b>p{l1_pct:.0f}</b>'
+                f'&nbsp;&nbsp;|&nbsp;&nbsp;'
+                f'p10={_l1_pcts[10]:.4f}'
+                f'&nbsp;p25={_l1_pcts[25]:.4f}'
+                f'&nbsp;p50={_l1_pcts[50]:.4f}'
+                f'&nbsp;p75={_l1_pcts[75]:.4f}'
+                f'&nbsp;p90={_l1_pcts[90]:.4f}'
+                f'</span>'
+            )
+        else:
+            l1_line = ''
         pred_md.object = (
             f'<div style="font-size:12px;line-height:2;">'
             f'<b>Patch:</b> <code>{Path(fname).stem}</code><br>'
             f'<b>Condition:</b> {cond}<br>'
-            f'<i>Prediction by</i> <code>{model_name}</code>:<br>'
+            + (f'{l1_line}<br>' if l1_line else '')
+            + f'<i>Prediction by</i> <code>{model_name}</code>:<br>'
             f'<b>FA type:</b> '
             f'<span style="font-size:14px;font-weight:bold;color:{fa_color};">'
             f'{fa}</span><br>'
@@ -726,9 +789,7 @@ def build_app(data_h5: str | None = None,
             patch_col.objects = [_patch_figure(
                 patches_raw[idx], recon_arr,
                 title=Path(fname).stem,
-                show_blue=ck_blue.value,
-                show_yellow=ck_yellow.value,
-                show_red=ck_red.value,
+                vmax=2.0 if dim_toggle.value else 1.0,
             )]
         elif has_old_patches:
             stem    = Path(fname).stem
@@ -749,20 +810,57 @@ def build_app(data_h5: str | None = None,
             else:
                 patch_col.objects = [pn.pane.Markdown(f'*Patch files not found for {stem}*')]
 
+        # Side patch column: per-channel thumbnails from extra_ch_images
+        if extra_ch_images and img_meta is not None:
+            _pg_col = 'patch_group' if 'patch_group' in df.columns else 'group'
+            row_df  = df.iloc[idx]
+            group   = str(row_df.get(_pg_col, ''))
+            grp_meta = img_meta[img_meta['group'].astype(str) == group]
+            if grp_meta.empty:
+                side_patch_col.objects = []
+            else:
+                frame_row = int(grp_meta.iloc[0]['frame'])
+                cx = row_df.get('canvas_cx', np.nan)
+                cy = row_df.get('canvas_cy', np.nan)
+                ps_val = int(row_df.get('ps', 32))
+                if pd.isna(cx) or pd.isna(cy):
+                    side_patch_col.objects = []
+                else:
+                    ch_panes = []
+                    for k, frames in extra_ch_images.items():
+                        if frame_row >= len(frames):
+                            print(f'[view] WARN: frame_row {frame_row} out of range for channel {k} ({len(frames)} frames)', flush=True)
+                            continue
+                        frame  = _norm_image(frames[frame_row])
+                        cx_i   = int(round(float(cx)))
+                        cy_i   = int(round(float(cy)))
+                        half   = ps_val // 2
+                        patch  = frame[max(0, cy_i - half):cy_i + half,
+                                       max(0, cx_i - half):cx_i + half]
+                        if patch.size == 0:
+                            print(f'[view] WARN: empty patch crop for channel {k} at cx={cx_i} cy={cy_i}', flush=True)
+                            continue
+                        fig_s, ax_s = plt.subplots(figsize=(1.56, 1.56))
+                        ax_s.imshow(patch, cmap='gray', vmin=0,
+                                    vmax=2.0 if dim_toggle.value else 1.0)
+                        ax_s.set_title(_ch_label(k), fontsize=8)
+                        ax_s.axis('off')
+                        fig_s.tight_layout(pad=0.2)
+                        ch_panes.append(_fig_to_pane(fig_s))
+                    side_patch_col.objects = ch_panes
+
     # Re-render detail panel when checkboxes change (so overlay updates live)
     def _refresh_detail(_=None):
         if _last_detail_idx[0] is not None:
             _show_detail(_last_detail_idx[0])
 
-    ck_blue.param.watch(_refresh_detail, 'value')
-    ck_yellow.param.watch(_refresh_detail, 'value')
-    ck_red.param.watch(_refresh_detail, 'value')
+    dim_toggle.param.watch(_refresh_detail, 'value')
 
     # ── Direction A: UMAP tap → detail + canvas highlight ─────────────────────
     def _on_umap_tap(attr, old, new):
         if not new:
             return
-        idx = int(new[0])
+        idx = int(umap_src.data['idx'][new[0]])
         _show_detail(idx)
 
         if not has_images:
@@ -772,18 +870,33 @@ def build_app(data_h5: str | None = None,
         cx     = row.get('canvas_cx', np.nan)
         cy     = row.get('canvas_cy', np.nan)
         ps     = float(row.get('ps', 32))
-        H_cur  = _state['H']
+
         if not pd.isna(cx) and not pd.isna(cy):
-            bx = float(cx) * image_scale
-            by = (H_cur - float(cy)) * image_scale
-            sel_src.data = dict(
-                x=[bx], y=[by],
-                width=[ps * image_scale], height=[ps * image_scale],
-            )
-            # Switch image panel to the source image containing this patch
-            if pg_val and pg_val != _state['group']:
+            if pg_val and pg_val not in _unique_groups_set:
+                print(f'[view] WARN: UMAP patch group {pg_val!r} not in image data — skipping canvas update', flush=True)
+                return
+            # Load group first so _state['H'] is correct before computing bx/by
+            if pg_val and pg_val != _state.get('group'):
                 _load_group(pg_val)
                 img_select_widget.value = pg_val
+            H_cur = _state['H']
+            bx = float(cx) * image_scale
+            by = (H_cur - float(cy)) * image_scale
+            w  = ps * image_scale
+            sel_src.data = dict(x=[bx], y=[by], width=[w], height=[w])
+            # Auto-pan canvas — equal x/y span so aspect ratio is preserved.
+            # Clamp end first, then slide start back to keep span = 2*margin.
+            margin = w * 6
+            W_sc = _state['W'] * image_scale
+            H_sc = _state['H'] * image_scale
+
+            xe = min(W_sc, bx + margin)
+            xs = max(0.0,  xe - 2 * margin)
+            ye = min(H_sc, by + margin)
+            ys = max(0.0,  ye - 2 * margin)
+
+            img_fig.x_range.start, img_fig.x_range.end = xs, xe
+            img_fig.y_range.start, img_fig.y_range.end = ys, ye
 
     if not data_only:
         umap_src.selected.on_change('indices', _on_umap_tap)
@@ -812,12 +925,13 @@ def build_app(data_h5: str | None = None,
             near_i  = int(np.argmin(dists))
             near_df = int(df_idx[near_i])
 
-            # Big red dot on UMAP (model mode only)
+            # Big dot on UMAP colored by FA label (model mode only)
             if not data_only:
-                row    = df.iloc[near_df]
-                umap_x = float(row.get('UMAP_1', row.get('umap_1', 0)) or 0)
-                umap_y = float(row.get('UMAP_2', row.get('umap_2', 0)) or 0)
-                highlight_src.data = dict(x=[umap_x], y=[umap_y])
+                row      = df.iloc[near_df]
+                umap_x   = float(row.get('UMAP_1', row.get('umap_1', 0)) or 0)
+                umap_y   = float(row.get('UMAP_2', row.get('umap_2', 0)) or 0)
+                dot_color = _label_color(str(row.get('fa_pred', '')), FA_COLOR_MAP)
+                highlight_src.data = dict(x=[umap_x], y=[umap_y], color=[dot_color])
 
             # White-border highlight on canvas
             sel_src.data = dict(
@@ -875,11 +989,9 @@ def build_app(data_h5: str | None = None,
     )
 
     if has_images:
-        outlier_row = pn.Row(
-            pn.pane.HTML('<b style="font-size:11px;">Highlight:</b>', width=65),
-            ck_blue, ck_yellow, ck_red,
-        )
-        canvas_col = pn.Column(img_select_widget, outlier_row, img_pane, width=540)
+        canvas_col = pn.Column(img_select_widget,
+                               pn.Row(pn.layout.HSpacer(), dim_toggle),
+                               img_pane, width=540)
     else:
         canvas_col = pn.pane.Markdown(
             '*Full image data not in this HDF5.*\n\n'
@@ -889,15 +1001,22 @@ def build_app(data_h5: str | None = None,
 
     src_label = (Path(model_h5).name if model_h5 else '') + \
                 (' + ' + Path(data_h5).name if data_h5 else '')
+    header = pn.pane.HTML(
+        f'<h2>Interactive Patch Viewer &nbsp;·&nbsp; '
+        f'<code>{src_label}</code>'
+        f' &nbsp;·&nbsp; <code>{model_name}</code></h2>',
+        sizing_mode='stretch_width',
+    )
+    # Nest left_col + canvas + extra-channel row in their own Column so the
+    # extra channels never shift when detail_col or side_patch_col grow.
+    left_canvas_col = pn.Column(
+        pn.Row(left_col, pn.Spacer(width=12), canvas_col),
+        *(([pn.Row(*extra_ch_panes)]) if extra_ch_panes else []),
+    )
     return pn.Column(
-        pn.pane.HTML(
-            f'<h2>Interactive Patch Viewer &nbsp;·&nbsp; '
-            f'<code>{src_label}</code>'
-            f' &nbsp;·&nbsp; <code>{model_name}</code></h2>',
-            sizing_mode='stretch_width',
-        ),
-        pn.Row(left_col, pn.Spacer(width=12), canvas_col,
-               pn.Spacer(width=12), detail_col),
+        header,
+        pn.Row(left_canvas_col, pn.Spacer(width=12, sizing_mode='fixed'), detail_col,
+               pn.Spacer(width=8, sizing_mode='fixed'), side_patch_col),
     )
 
 

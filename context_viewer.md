@@ -1,294 +1,250 @@
-# Context: Interactive Patch Viewer (`scripts/view_interactive.py`)
+# Context: Data Viewer (`scripts/data_viewer.py`)
 
-This file gives Claude Code enough background to continue development of the
-interactive viewer without re-explaining prior decisions.
+This document gives Claude Code enough background to continue development of the
+standalone data viewer without re-explaining prior decisions.
+
+For the model+UMAP interactive viewer see `context_interactive_viewer.md`.
 
 ---
 
 ## What the viewer is
 
-A Panel + Bokeh web app for exploring FA patch data.  Two directions of use:
+A Panel + Bokeh web app for exploring raw multi-channel FA patch data — no model
+outputs.  Multiple datasets are served at separate URL routes from one process.
 
-- **Direction A — UMAP → detail**: hover a UMAP dot for a thumbnail tooltip;
-  tap a dot to load the full patch detail panel below.
-- **Direction B — Canvas → UMAP**: pick a source image from the dropdown;
-  full paxillin canvas is shown with coloured patch boxes; clicking a box
-  highlights it on the UMAP and loads the detail panel.
-
-Three modes depending on what H5 files are given:
-
-| Mode | Files | Left panel |
-|------|-------|------------|
-| Data-only | `data.h5` only | Per-pixel intensity histogram |
-| Model (single-file legacy) | `interactive.h5` | UMAP scatter |
-| Two-file | `data.h5` + `model.h5` | UMAP scatter (images from data.h5) |
-
----
-
-## How to run (on the Ubuntu server 128.135.108.226)
-
-```bash
-# activate env first — the server does not auto-activate conda
-conda activate <env_name>         # or source activate, whatever the server uses
-
-# Data-only mode (no UMAP — just canvas + histogram)
-python scripts/view_interactive.py \
-    /path/to/ae_results/patches/cio/vinc/data.h5 \
-    --serve --port 5006
-
-# Two-file mode (UMAP + canvas)
-python scripts/view_interactive.py \
-    /path/to/data.h5  /path/to/model.h5 \
-    --serve --port 5006
+Layout per dataset:
 ```
-
-`--serve` binds to `0.0.0.0` so other machines can connect.  The script
-prints the LAN IP on startup.  Access from the workstation:
-`http://128.135.108.226:5006`
-
-Port 5006 must be open in UFW:
-```bash
-sudo ufw allow 5006/tcp
-sudo ufw status   # verify
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │  Dataset N: ds_name — pax-ch1 · vinc-ch0 · zyxin-ch2 · actin-ch3       │
+  ├─────────────────────────────┬────────────────────────────────────────────┤
+  │  Paxillin canvas (520px)    │  Side channel canvases (265px each, linked)│
+  │  + pixel overlay checkboxes │  + grid rect overlay only (no px overlay)  │
+  │  + grid colour checkboxes   │                                            │
+  ├─────────────────────────────┴────────────────────────────────────────────┤
+  │  [Histogram pax-ch1]   [Detail text]   [Patch thumbnails — all channels] │
+  └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## H5 file design (two-file split)
+## How to run (current server: 128.135.108.109, port 5008)
 
-### `data.h5`  — static, shared across models
+```bash
+# Four datasets at /vinc  /ppax  /pfak  /nih3t3
+nohup python scripts/data_viewer.py \
+    /mnt/p/image_service/data/FA_patch_data/cio/vinc/data.h5 \
+    /mnt/p/image_service/data/FA_patch_data/cio/ppax/data.h5 \
+    /mnt/p/image_service/data/FA_patch_data/cio/pfak/data.h5 \
+    /mnt/p/image_service/data/FA_patch_data/cio/nih3t3/data.h5 \
+    --port 5008 --serve > /tmp/data_viewer.log 2>&1 &
+```
+
+`--serve` binds to `0.0.0.0`.  Each dataset gets a route `/{ds_name}`.
+With one path, the app is served at `/`.
+
+---
+
+## H5 format (`data.h5`)
 
 Built by `scripts/pack_data_h5.py`.
 
 ```
-patches/raw       float32 (N, 32, 32)   all conditions combined
-images/raw        float32 (M, H, W)     paxillin frames
-images/{ch}       float32 (M, H, W)     vinc / ppax / pfak / zyx / act
+patches/raw       float32 (N, 32, 32)   all patches, all conditions
+images/raw        float32 (M, H, W)     paxillin frames (channel 0 in ch_keys)
+images/{ch}       float32 (M, H, W)     extra channels (same M frame order)
 images/meta       bytes (CSV)           group, frame (row index), condition_name, frame_idx
-meta/csv          bytes (CSV)           per-patch: filename, condition_name, group,
-                                        frame_idx, canvas_cx, canvas_cy, ps,
+meta/csv          bytes (CSV)           filename, condition_name, group, frame_idx,
+                                        canvas_cx, canvas_cy, ps,
                                         mean_intensity, annotation_label, annotation_label_name
 attrs: pad_size, image_scale, dataset, n_patches, n_frames, channels (JSON)
 ```
 
-**Key coordinate convention**: `canvas_cx`, `canvas_cy` in `meta/csv` are the
-**centre** of each patch in unpadded canvas pixel space (i.e. already
-`x_padded - pad_size`).  Patch covers
-`[cy - ps//2 : cy + ps//2, cx - ps//2 : cx + ps//2]` in the canvas array.
-
-### `model.h5`  — per-model outputs
-
-Built by `scripts/pack_model_h5.py`.
-
-```
-patches/raw       float32 (N, 32, 32)   (same patches, model-row order)
-patches/recon     float32 (N, 32, 32)   AE reconstructions
-latents           float32 (N, D)
-meta/csv          bytes (CSV)           includes UMAP_1, UMAP_2, fa_pred, pos_pred, z_*
-plots/…           bytes (PNG)           MSE plots packed in
-```
+`channels` attr: JSON list e.g. `["pax","vinc","zyx","act"]`.
+`images/raw` = first entry (pax). `images/{k}` = remaining entries.
 
 ---
 
-## Intensity / normalisation facts (CIO norm)
+## Channel label convention
 
-- CIO-normalised pixel values are **not** clipped to [0, 1].  They can reach
-  10+ in bright frames.
-- Patch means are ~0.15–0.17.  Patch max (32×32 crop) reaches ~2–3 for most
-  datasets — **this low ceiling is an artifact of the packer bug below, not
-  a real property of the data.** See "Known issue" section.
-- The `>2` and `>5` outlier thresholds are **per-pixel** thresholds on the
-  actual float32 values.
-- `_norm_image()` does **no clipping** — just casts to float32.  The canvas
-  is displayed with `vmin=0, vmax=1`; bright pixels simply saturate white.
-- The histogram in data-only mode shows `patches_raw.flatten()` (per-pixel
-  distribution, 200 bins).
+```python
+_CH_IDX   = {'pax': 1, 'zyx': 2, 'act': 3, 'vinc': 0, 'ppax': 0, 'pfak': 0}
+_CH_SHORT  = {'pax': 'pax', 'zyx': 'zyxin', 'act': 'actin', 'vinc': 'vinc', …}
 
----
+# Canvas title labels: "pax-ch1", "vinc-ch0", "zyxin-ch2", "actin-ch3"
+ch_canvas_labels = [f'{_CH_SHORT.get(k,k)}-ch{_CH_IDX.get(k,"?")}' for k in ch_keys]
 
-## Known issue: 5x scale mismatch between canvas and patches (found 2026-07-23)
-
-**Root cause (packer/pipeline, not the viewer):** `patches/raw` /
-`patches/recon` and `images/raw` are generated by two different pipelines
-that both call the same `normalize_cell_insideoutside(img, seg, scale=...)`
-(`subcellae/dataprep/patch_prep.py:549`), but with different `scale`:
-
-- `patchprep_pipeline.py` (produces `patches/raw`) never overrides
-  `norm_cell_scale` in any `config/patchprep_config/*_cio.yaml` → silently
-  uses the dataclass default **`5.0`** (`subcellae/pipeline/patchprep_pipeline.py:130`).
-- `frameextract_pipeline.py` (produces `images/raw`, the full canvas) has
-  every `config/frameextract_config/*_cio.yaml` explicitly set **`scale: 1.0`**
-  per channel (comment there literally says "CIO only (no rolling ball,
-  scale=1)").
-
-Net effect: for the *same physical patch region*, `patches_raw[idx]` is
-exactly `images_raw_crop / 5.0` — verified numerically (median ratio
-5.0000, every sample) against `/mnt/p/image_service/data/FA_patch_data/cio/ppax/data.h5`.
-Affects all 4 `cio` datasets (vinc, pfak, ppax, nih3t3); `cio_rb` not checked.
-
-**Symptom this caused:** the `>2`/`>5`/`<0` outlier checkboxes correctly
-highlighted bright pixels on the canvas but almost never on the zoom-in
-patch detail view, since patch values were silently 5x smaller than the
-canvas-calibrated thresholds expected.
-
-**Interim fix, already in `view_interactive.py` (commit `0766113`)** — viewer-side
-only, does not touch any `data.h5`:
-- `_PATCH_OVERLAY_SCALE_FIX = 5.0` (module constant near `_patch_figure`)
-  multiplies the patch array by 5x before the `_patch_intensity_overlay`
-  threshold check, so overlay highlighting matches the canvas.
-  Equivalent to just testing `patches_raw > 1` for the red (`>5`) threshold.
-- Display-only rescale to close the same visual gap: canvas image divided by
-  `10.0` (both at initial load and in `_load_group`), patch image divided by
-  `2.0` in `_patch_figure`'s `imshow` call. Both land on `true_value/10`.
-  Gray mapper / `vmin`,`vmax` reset to `(-0.01, 1.0)` accordingly. Comments
-  at each site point back to this section.
-
-**Real fix — not yet done, needs cluster access:** realign the two pipeline
-configs so patches and canvas frames share one `scale`. Either:
-  a) set `scale: 5.0` in every `config/frameextract_config/*_cio.yaml`, or
-  b) set `norm_cell_scale: 1.0` explicitly in every `config/patchprep_config/*_cio.yaml`
-then re-run `frameextract_pipeline` / `patchprep_pipeline` + `pack_data_h5.py`
-to regenerate `data.h5` for all 4 datasets. Once that's done, the interim
-viewer-side divisors above should be removed/revisited — they're a stopgap
-tied to the current *broken* data, not something to keep permanently.
-
----
-
-## Canvas pixel overlay (intensity highlight)
-
-Three checkboxes: `< 0 (blue)`, `> 2 (yellow)`, `> 5 (red)`.
-
-When any box is ticked:
-
-1. **Canvas overlay** (`_refresh_overlay`): builds a boolean `patch_mask`
-   from every patch's bounding box for the current frame, then creates a
-   `(H, W)` uint32 RGBA array via `_make_pixel_overlay` and pushes it into
-   `overlay_src` which feeds an `image_rgba` renderer layered on top of the
-   canvas figure.  Only pixels **inside** patch boxes get coloured.
-
-2. **Zoom-in detail** (`_refresh_detail`): re-calls `_show_detail` with the
-   last selected patch index (`_last_detail_idx[0]`), which re-renders the
-   matplotlib patch image with `_patch_intensity_overlay` applied on top of
-   the grayscale imshow.
-
-Both update live when any checkbox toggles.
-
-### Key helpers
-
-| Function | Where | Purpose |
-|----------|-------|---------|
-| `_make_pixel_overlay(arr, patch_mask, sb, sy, sr)` | module level | uint32 RGBA for Bokeh `image_rgba`, y-flipped |
-| `_patch_intensity_overlay(arr, sb, sy, sr)` | module level | float32 RGBA for matplotlib imshow overlay |
-| `_refresh_overlay()` | closure in `has_images` block | rebuild canvas overlay from current frame + state |
-| `_refresh_detail(_=None)` | closure after `_show_detail` | re-render zoom-in if a patch is selected |
-| `_last_detail_idx` | `list[int\|None]` | single-element list tracking last `_show_detail` call |
-
----
-
-## Bokeh coordinate system
-
-The canvas image is displayed with `np.flipud` so that row 0 of the array
-appears at the top.  The convention throughout:
-
-```
-Bokeh y  =  img_H - canvas_y       (for rects and tap events)
-canvas_y =  img_H - Bokeh y
+# Dataset header: "Dataset 1: vinc — pax-ch1 · vinc-ch0 · zyxin-ch2 · actin-ch3"
 ```
 
-`image_rgba` and `image` renderers share the same coordinate system.
-`overlay_src` must be updated with `dw=W, dh=H` matching the current frame
-whenever the group changes (`_load_group` calls `_refresh_overlay()`).
+The `is_pax` check in `_all_channel_figure` uses **index position** (`i == 0`),
+NOT name substring — important because 'pax' is a substring of 'ppax'.
+
+---
+
+## Canvas and image loading
+
+`_read_h5` returns:
+```
+df, patches_raw, images_raw, img_meta,
+images_allch,      # {ch_key: float32 (M, H, W)} — extra channels only
+channel_names,     # display labels list
+ch_keys,           # raw key list e.g. ['pax','vinc','zyx','act']
+pad_size, image_scale
+```
+
+Per-frame channel data is stored as a flat `images_allch[ch_key]` array indexed
+by the same `frame` row from `images/meta` — NOT a per-frame dict.
+
+`_all_channel_figure(i, name, arr, H, W, ...)` builds one Bokeh figure per
+channel. For `i == 0` (pax): pixel overlay RGBA renderer is added.
+Side channels: pixel overlay is skipped; only grid rects are drawn.
+
+---
+
+## Pixel intensity overlay (paxillin only)
+
+Four thresholds (per-pixel on float32 CIO values):
+| Threshold | Colour |
+|-----------|--------|
+| < 0 | blue `#4488FF` |
+| > 1 | dark green `#009944` |
+| > 2 | magenta `#FF44FF` |
+| > 4 | red `#FF4444` |
+
+`_on_pixel_overlay(e)`: rebuilds a uint32 RGBA array from the current pax frame,
+pushes to `overlay_src` (`image_rgba` renderer on pax canvas only).
+Called when any pixel-highlight checkbox changes or when the group changes.
+
+Checkboxes: `ck_blue`, `ck_green`, `ck_magenta`, `ck_red` — Panel `Checkbox`.
+
+---
+
+## Grid rect overlay
+
+Drawn on ALL channel canvases (pax + side). Three border colour bands based on
+**paxillin patch max intensity** (`patch_maxes`):
+| patch max | Border |
+|-----------|--------|
+| ≤ 2 | invisible (lw=0) |
+| > 2 | magenta, lw=0.5 |
+| > 4 | red, lw=1.5 |
+
+Default: all grid checkboxes off.  Label: "based on pax patch intensity max".
+
+`rects_src` is a single `ColumnDataSource` shared by all channel canvas figures
+(they all render the same rects, since canvases are aligned).
+
+---
+
+## Dim toggle
+
+`dim_toggle` Panel Toggle (Dim vmax=2).  On toggle:
+```python
+gray_mapper.high = 2.0 if e.new else 1.0
+for _m in side_mappers:   # list of LinearColorMapper for each side channel
+    _m.high = 2.0 if e.new else 1.0
+```
+All channel canvases dim together. Button placed in bottom row beside detail text.
+
+---
+
+## Aspect ratio sizing
+
+Canvas figures are sized proportionally to the image H/W:
+```python
+_aspect = H / W
+_pax_w, _pax_h   = 520, int(520 * _aspect)
+_side_w, _side_h = 265, int(265 * _aspect)
+```
+Computed once per `build_app` call from the initial frame dimensions.
 
 ---
 
 ## Layout skeleton
 
+```python
+info_bar   = pn.Row(dataset_info_html, HSpacer())
+pax_col    = pn.Column(pn.pane.Bokeh(pax_fig), width=_pax_w + 10)
+right_col  = pn.Column(img_select, overlay_row, grid_row, side_row)
+canvas_row = pn.Row(pax_col, right_col)
+detail_row = pn.Row(pn.Column(detail_info, width=465), dim_toggle)
+bottom_row = pn.Row(hist_col, pn.Column(detail_row, patch_pane))
+return pn.Column(info_bar, canvas_row, bottom_row)
 ```
-pn.Column(
-    header HTML,
-    pn.Row(
-        left_col,       # UMAP pane (Bokeh) OR histogram + dataset info (data-only)
-        Spacer,
-        canvas_col,     # Select widget + highlight checkboxes + Bokeh canvas pane
-        Spacer,
-        detail_col,     # patch text + zoom-in patch PNG + legend + MSE button
-    )
-)
-```
+
+`overlay_row` = pixel highlight checkboxes (< 0, > 1, > 2, > 4).
+`grid_row` = grid colour checkboxes with "based on pax patch intensity max" label.
+`side_row` = side-channel Bokeh canvases with linked ranges.
+
+Widget widths `_W0, _W1, _W2, _W3 = 105, 140, 115, 85` are tuned to align
+pixel-highlight checkboxes and grid checkboxes into matching columns horizontally.
 
 ---
 
-## CLI / serving
+## Histogram
 
+- Paxillin pixel intensity distribution (all patches flattened).
+- Title: `f'pax-ch1  N={n}\n<0:{n_b}  >1:{n_g}  >2:{n_m}  >4:{n_r}'`
+  (dataset name NOT shown — histogram is always pax regardless of dataset).
+- Size: `figsize=(3.0, 3.0)`, `dpi=100`.  Container: `hist_col width=320`.
+
+---
+
+## Patch thumbnails (bottom right)
+
+On canvas click → shows `n_ch` patches (one per channel) in a row.
+```python
+figsize = (2.5 * n_ch, 2.5)
+patch_pane width = int(2.5 * 100 * n_ch)
 ```
-__main__ block:
-  ap.add_argument('h5', nargs='*')   # 0, 1, or 2 H5 paths
-  ap.add_argument('--port', type=int, default=5006)
-  ap.add_argument('--serve', action='store_true')
 
-0 paths  →  build_loader_app()  (web form to enter paths)
-1 path   →  load_sources(None, path)  (single-file / model.h5 mode)
-2 paths  →  load_sources(path[0], path[1])  (data.h5 + model.h5)
+`detail_info` is a single `white-space:nowrap` HTML line — no wrapping, no
+fixed width, to avoid pushing the patch pane sideways.
+
+---
+
+## Multi-dataset routing
+
+```python
+routes = {}
+for i, path in enumerate(h5_paths):
+    ds = Path(path).parent.name   # e.g. 'vinc'
+    routes[f'/{ds}'] = (lambda h=path, idx=i+1: build_app(h, ds_idx=idx))
+pn.serve(routes, address='0.0.0.0', port=args.port, ...)
 ```
 
-When served via `panel serve` instead of `python`:
-`pn.state.session_args['args']` is read in `_get_cli_paths()`.
+`build_app(data_h5, ds_idx=1)` — `ds_idx` is used only for the dataset header.
+Single-path mode: `pn.serve(build_app(args.h5[0]), ...)` (served at `/`).
+
+---
+
+## Known issue: 5× scale mismatch between canvas and patches
+
+`patches/raw` (patchprep pipeline) and `images/raw` (frameextract pipeline)
+were generated with different `normalize_cell_insideoutside` scale values:
+- `patchprep`: uses default `scale=5.0` (never overridden in cio configs)
+- `frameextract`: uses `scale=1.0` (explicitly set in cio configs)
+
+Net effect: `patches_raw[i]` ≈ `canvas_crop / 5`.
+
+**Viewer-side workaround** (still in place):
+- Canvas displayed with `/10` divisor; patches displayed with `vmax` tuned accordingly.
+- Pixel-overlay thresholds applied to canvas values (not patch values).
+
+**Real fix** (not yet done): realign patchprep + frameextract configs to use the
+same scale, then re-pack `data.h5`. Remove viewer-side divisors after repacking.
 
 ---
 
 ## Things to know / traps
 
-- **Do not add back `max_intensity` to `data.h5`** — outlier stats are
-  computed in-memory from `patches_raw` in the viewer, not stored in H5.
-- **Patch box colours** always use FA-type colour (from `FA_COLOR_MAP`).
-  Intensity does NOT recolour boxes — intensity is shown only via the RGBA
-  pixel overlay.
-- **`_show_detail` must update `_last_detail_idx[0]`** at its very start so
-  that `_refresh_detail` can re-invoke it when checkboxes change.
-- **`_rects_for_group` uses `df.iterrows()`** which is slow for large
-  datasets but acceptable for typical frame sizes (~200–500 patches/frame).
-- The `image_rgba` renderer's `x`, `y`, `dw`, `dh` are read from
-  `overlay_src.data`, not from the glyph call kwargs — pass them as column
-  names (strings) in the `image_rgba(...)` call, or update them in
-  `overlay_src.data` on every group switch.
-- **The `/10` (canvas) and `/2` (patch) display divisors and the
-  `_PATCH_OVERLAY_SCALE_FIX = 5.0` overlay multiplier are a stopgap for a
-  packer-side bug**, not a deliberate display choice — see "Known issue: 5x
-  scale mismatch" above. Don't remove them without checking whether the
-  frameextract/patchprep configs have been realigned first.
-
----
-
-## Git workflow with the server
-
-The server (`dsadmin@128.135.108.226`) has the repo cloned at the same path.
-Push from this workstation, then SSH to the server and pull:
-
-```bash
-# workstation
-git push
-
-# server
-ssh dsadmin@128.135.108.226
-cd /path/to/SubCellAE
-git pull
-```
-
-The SSH alias `viewserver` in `~/.ssh/config` on this workstation connects
-to 128.135.108.226 as `dsadmin`.
-
----
-
-## Data paths on the server
-
-Data lives on a NAS (mounted at `/net/projects/` on the cluster).  The server
-may have it mounted differently — check before assuming paths match.
-
-```
-ae_results/patches/cio/{ds}/data.h5       ← packed by pack_data_h5.py --norm cio
-ae_results/patches/cio_rb/{ds}/data.h5    ← cio_rb variant
-ae_results/patches/cio/{ds}/{model}/model.h5
-```
-
-`/mnt/p/image_service/` is the NAS mirror path for pre-packed H5 files
-served to the viewer; may or may not be mounted on the server.
+- **`is_pax = i == 0`** (index check), never `'pax' in name.lower()` — the latter
+  matches 'ppax' and would apply pax overlay to the wrong channel.
+- **`side_mappers` list** accumulates one `LinearColorMapper` per side channel;
+  the dim toggle iterates this list. Don't forget to append to it when adding
+  a new channel canvas.
+- **Grid checkboxes default to off** — `value=False` in all three `pn.Checkbox`.
+- **`pn.layout.HSpacer()`** at the end of `grid_row` prevents
+  `sizing_mode='stretch_width'` from spreading the checkboxes apart.
+- **`_NORM_FKEY = re.compile(r'_f0*(\d)')`** strips frame-number prefix when
+  grouping patches — used in title/label generation, not routing.
