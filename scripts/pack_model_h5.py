@@ -206,6 +206,9 @@ def pack_model(result_dir: Path, out_h5: Path, pad_size: int = 64) -> None:
         # New stacked format: single TIF + index CSV
         patch_idx   = pd.read_csv(recon_idx)
         recon_stack = tifffile.imread(str(recon_tif)).astype(np.float32)
+        # Shape may be (N, H, W) or (N, C, H, W) for multi-channel models — take ch0
+        if recon_stack.ndim == 4:
+            recon_stack = recon_stack[:, 0]
         _, H, W     = recon_stack.shape[:3]
         name_to_frame = {str(r['name']): int(r['frame'])
                          for _, r in patch_idx.iterrows()}

@@ -609,9 +609,17 @@ def main():
         routes = {'/': lambda h=args.h5[0]: build_app(h, ds_idx=1)}
         print(f'[data_viewer] http://localhost:{args.port}/  →  {args.h5[0]}')
     else:
+        # Build route names; prepend grandparent when ds names collide
+        ds_names = [Path(p).parent.name for p in args.h5]
+        from collections import Counter
+        dup = {k for k, v in Counter(ds_names).items() if v > 1}
+        route_names = [
+            f"{Path(p).parent.parent.name}_{Path(p).parent.name}" if Path(p).parent.name in dup
+            else Path(p).parent.name
+            for p in args.h5
+        ]
         routes = {}
-        for i, path in enumerate(args.h5):
-            ds = Path(path).parent.name
+        for i, (path, ds) in enumerate(zip(args.h5, route_names)):
             routes[f'/{ds}'] = (lambda h=path, idx=i+1: build_app(h, ds_idx=idx))
             print(f'[data_viewer] http://localhost:{args.port}/{ds}  →  {path}')
 

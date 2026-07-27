@@ -860,7 +860,10 @@ def build_app(data_h5: str | None = None,
     def _on_umap_tap(attr, old, new):
         if not new:
             return
-        idx = int(umap_src.data['idx'][new[0]])
+        data = umap_src.data
+        if 'idx' not in data or new[0] >= len(data['idx']):
+            return  # stale selection after filter swap — ignore
+        idx = int(data['idx'][new[0]])
         _show_detail(idx)
 
         if not has_images:
@@ -1015,8 +1018,8 @@ def build_app(data_h5: str | None = None,
     )
     return pn.Column(
         header,
-        pn.Row(left_canvas_col, pn.Spacer(width=12, sizing_mode='fixed'), detail_col,
-               pn.Spacer(width=8, sizing_mode='fixed'), side_patch_col),
+        pn.Row(left_canvas_col, pn.Spacer(width=12, height=1, sizing_mode='fixed'), detail_col,
+               pn.Spacer(width=8, height=1, sizing_mode='fixed'), side_patch_col),
     )
 
 
