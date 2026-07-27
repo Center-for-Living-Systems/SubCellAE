@@ -226,37 +226,162 @@ Empty patch crop (near-edge coordinates):
 
 ## UMAP filter internals
 
+Two filters compose via AND:
+
 ```python
-_umap_all_data     = {k: np.array(v) for k, v in umap_data.items()}
-labeled_mask       = df['annotation_label'].fillna(-1).values >= 0
-_umap_labeled_data = {k: v[labeled_mask] for k, v in _umap_all_data.items()}
-# umap_data['idx'] holds original df row indices — preserved in filtered subset
+_umap_base = {k: np.array(v) for k, v in umap_data.items()}   # full data
+
+def _compute_umap_mask():
+    # Dataset filter
+    val = ds_select.value   # 'Training' | 'All' | 'vinc' | 'ppax' | ...
+    if val == 'Training':
+        ds_mask = np.isin(_umap_base['split'], ['train', 'val'])
+    elif val == 'All':
+        ds_mask = np.ones(n, dtype=bool)
+    else:
+        ds_mask = (_umap_base['dataset'] == val)
+    # Labeled-only toggle
+    lab_mask = labeled_mask if umap_filter.value == 'Labeled only' else np.ones(n, dtype=bool)
+    return ds_mask & lab_mask
+
+def _update_umap_src(event=None):
+    idxs = np.where(_compute_umap_mask())[0]
+    umap_src.data = {k: v[idxs] for k, v in _umap_base.items()}
 ```
+
+`umap_data` dict now includes `dataset`, `split`, `color_ds` columns in addition to
+the old `color_fa`, `color_pos`, `idx`, `filename`, `condition`, `fa_pred`, `pos_pred`.
 
 `_on_umap_tap` uses `int(umap_src.data['idx'][new[0]])` (not `int(new[0])`)
 so it always gets the original df row index regardless of which filter is active.
 
 ---
 
-## Running the viewer (current server: 128.135.108.109)
+## Running the viewer
 
-Port layout:
-| Port | Process |
-|------|---------|
-| 5006 | `view_interactive.py` — supcon model (vinc data.h5) |
-| 5007 | Reserved for label_patches.py labeller (other computer) |
-| 5008 | `data_viewer.py` — all 4 datasets |
-| 5009 | `view_interactive.py` — semisup_both model (vinc data.h5) |
+### CLI syntax
 
 ```bash
-# Pack model.h5 from a result directory
-python scripts/pack_model_h5.py /path/to/result_dir
+# Single model — 4 datasets
+python scripts/view_interactive.py \
+    /path/patches/cio/vinc/data.h5 \
+    /path/patches/cio/ppax/data.h5 \
+    /path/patches/cio/pfak/data.h5 \
+    /path/patches/cio/nih3t3/data.h5 \
+    --model /path/contrastive_run/<model>/model.h5
 
-# Launch model viewer (two-file mode)
-nohup python scripts/view_interactive.py \
-    /mnt/p/image_service/data/FA_patch_data/cio/vinc/data.h5 \
-    /path/to/result_dir/model.h5 \
-    --port 5009 --serve > /tmp/view_model.log 2>&1 &
+# Multiple models — shows a button bar at the top for switching
+python scripts/view_interactive.py \
+    /path/patches/cio/vinc/data.h5 \
+    /path/patches/cio/ppax/data.h5 \
+    /path/patches/cio/pfak/data.h5 \
+    /path/patches/cio/nih3t3/data.h5 \
+    --model /path/contrastive_run/modelA/model.h5 \
+    --model /path/contrastive_run/modelB/model.h5 \
+    --model /path/contrastive_run/modelC/model.h5
+
+# Legacy test_run_overfit_20260322 (single pax channel, 32x32 patches)
+python scripts/view_interactive.py \
+    /path/test_run_overfit_20260322/data.h5 \
+    --model /path/test_run_overfit_20260322/baseline/model.h5 \
+    --model /path/test_run_overfit_20260322/semisup_fa/model.h5 \
+    --model /path/test_run_overfit_20260322/semisup_pos/model.h5 \
+    --model /path/test_run_overfit_20260322/semisup_both/model.h5
+
+# Network-accessible (bind to 0.0.0.0)
+python scripts/view_interactive.py ... --port 5006 --serve
+
+# No args → loader UI (paste paths into text boxes)
+python scripts/view_interactive.py
+```
+
+### New viewer features (as of 2026-07-26)
+
+- **Dataset filter dropdown** (`ds_select`): default = Training (split ∈ {train, val}).
+  Options: Training | vinc | ppax | pfak | nih3t3 | All. Composes with labeled-only toggle.
+- **Colour by Dataset**: new option in the Bokeh colour-by selector (blue/orange/green/red per dataset).
+- **Multi-model button bar**: `build_multi_app` wraps `build_app`; data.h5 files are cached
+  so switching between models is instant after first load.
+- **Multi-line model input** in loader UI: one model.h5 path per line.
+
+### Cluster paths (DSI cluster)
+
+| Path | Contents |
+|------|----------|
+| `/net/projects/CLS/lding/data/fa_data_analysis/ae_results/patches/cio/{vinc,ppax,pfak,nih3t3}/data.h5` | CIO-normalised patches + images |
+| `/net/projects/CLS/lding/data/fa_data_analysis/ae_results/patches/cio_rb/{vinc,ppax,pfak,nih3t3}/data.h5` | CIO-RB-normalised patches + images |
+| `/net/projects/CLS/lding/data/fa_data_analysis/ae_results/contrastive_run/*/model.h5` | Flat ConAE / SupConAE models |
+| `/net/projects/CLS/lding/data/fa_data_analysis/ae_results/contrastive_run/ds_combo_*/*/model.h5` | ds_combo models |
+| `/net/projects/CLS/lding/data/fa_data_analysis/ae_results/test_run_overfit_20260322/data.h5` | Legacy pax-only dataset (per-image norm, 32×32) |
+| `/net/projects/CLS/lding/data/fa_data_analysis/ae_results/test_run_overfit_20260322/{baseline,semisup_fa,semisup_pos,semisup_both}/model.h5` | Legacy semisup models |
+
+---
+
+## Rsync commands (run from local Ubuntu machine)
+
+Cluster login: `liyading@login.ds.uchicago.edu`
+Local base: `/home/lding/lding/dsicluster_CLS_rsync_folder/data/fa_data_analysis/ae_results`
+
+### Group 1 — cio data.h5 (4 datasets, ~1.5 GB) — ready now
+
+```bash
+REMOTE=liyading@login.ds.uchicago.edu
+LOCAL=/home/lding/lding/dsicluster_CLS_rsync_folder/data/fa_data_analysis/ae_results
+
+for ds in vinc ppax pfak nih3t3; do
+    mkdir -p $LOCAL/patches/cio/$ds
+    rsync -avh --progress \
+        $REMOTE:/net/projects/CLS/lding/data/fa_data_analysis/ae_results/patches/cio/$ds/data.h5 \
+        $LOCAL/patches/cio/$ds/
+done
+```
+
+### Group 2 — legacy test_run_overfit_20260322 (~237 MB) — ready now
+
+```bash
+REMOTE=liyading@login.ds.uchicago.edu
+LOCAL=/home/lding/lding/dsicluster_CLS_rsync_folder/data/fa_data_analysis/ae_results
+SRC=/net/projects/CLS/lding/data/fa_data_analysis/ae_results/test_run_overfit_20260322
+
+mkdir -p $LOCAL/test_run_overfit_20260322/{baseline,semisup_fa,semisup_pos,semisup_both}
+
+rsync -avh --progress \
+    $REMOTE:$SRC/data.h5 \
+    $LOCAL/test_run_overfit_20260322/
+
+for m in baseline semisup_fa semisup_pos semisup_both; do
+    rsync -avh --progress \
+        $REMOTE:$SRC/$m/model.h5 \
+        $LOCAL/test_run_overfit_20260322/$m/
+done
+```
+
+### Group 3 — contrastive_run model.h5 files — wait for SLURM job 1226459 to finish
+
+```bash
+REMOTE=liyading@login.ds.uchicago.edu
+LOCAL=/home/lding/lding/dsicluster_CLS_rsync_folder/data/fa_data_analysis/ae_results
+SRC=/net/projects/CLS/lding/data/fa_data_analysis/ae_results/contrastive_run
+
+# Flat models (contrastive_cio_*, supcon_cio_*)
+rsync -avh --progress \
+    --include="*/" \
+    --include="model.h5" \
+    --exclude="*" \
+    $REMOTE:$SRC/ \
+    $LOCAL/contrastive_run/
+
+# ds_combo nested models (ds_combo_*/combo_name/model.h5)
+for parent in ds_combo_enlcrop_clip01_l1 ds_combo_enlcrop_sc2_clip02_l1 \
+              ds_combo_enlcrop_sc2 ds_combo_enlcrop_sc2_lc010_bal \
+              ds_combo_enlcrop_sc2_lc010_bal_l1 ds_combo_enlcrop_sc2_lc010_bal_mse; do
+    rsync -avh --progress \
+        --include="*/" \
+        --include="model.h5" \
+        --exclude="*" \
+        $REMOTE:$SRC/$parent/ \
+        $LOCAL/contrastive_run/$parent/
+done
 ```
 
 ---

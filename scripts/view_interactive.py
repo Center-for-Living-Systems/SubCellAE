@@ -63,6 +63,11 @@ from subcellae.utils.label_colors import (
 )
 FALLBACK = "#cccccc"
 
+_DATA_CACHE: dict[tuple, tuple] = {}   # keyed by tuple(sorted(paths))
+
+_DS_PALETTE = {'vinc': '#1f77b4', 'ppax': '#ff7f0e',
+               'pfak': '#2ca02c', 'nih3t3': '#d62728'}
+
 _CH_IDX   = {'pax': 1, 'zyx': 2, 'act': 3, 'vinc': 0, 'ppax': 0, 'pfak': 0}
 _CH_SHORT  = {'pax': 'pax', 'zyx': 'zyxin', 'act': 'actin',
                'vinc': 'vinc', 'ppax': 'ppax', 'pfak': 'pfak'}
@@ -96,9 +101,17 @@ def _read_h5_model(path: str):
 
     Returns (df, patches_raw, patches_recon, images_raw, img_meta,
              pad, scale, result_dir, plots).
+
+    Prefers meta/cross_ds_latents_csv (all 4 datasets) over meta/latents_csv
+    (training set only) over meta/csv (legacy format).
     """
     with h5py.File(path, 'r') as f:
-        df            = pd.read_csv(io.StringIO(f['meta/csv'][()].decode()))
+        for csv_key in ('meta/cross_ds_latents_csv', 'meta/latents_csv', 'meta/csv'):
+            if csv_key in f:
+                df = pd.read_csv(io.StringIO(f[csv_key][()].decode()))
+                break
+        else:
+            raise KeyError(f'No latent CSV found in {path}')
         patches_raw   = f['patches/raw'][()]   if 'patches/raw'   in f else None
         patches_recon = f['patches/recon'][()] if 'patches/recon' in f else None
         images_raw    = f['images/raw'][()]    if 'images/raw'    in f else None
@@ -107,8 +120,11 @@ def _read_h5_model(path: str):
         pad_size    = float(f.attrs.get('pad_size', 64))
         image_scale = float(f.attrs.get('image_scale', 1.0))
         result_dir  = Path(str(f.attrs.get('result_dir', '')))
-        plots = {key: bytes(f[f'plots/{key}'][()])
-                 for key in f.get('plots', {}).keys()}
+        plots: dict[str, bytes] = {}
+        for group in ('plots', 'plots_toplevel'):
+            if group in f:
+                for key in f[group].keys():
+                    plots[key] = bytes(f[f'{group}/{key}'][()])
     return df, patches_raw, patches_recon, images_raw, img_meta, pad_size, image_scale, result_dir, plots
 
 
@@ -137,66 +153,156 @@ def _read_h5_data(path: str):
     return df_data, patches_raw, images_raw, img_meta, pad_size, image_scale, extra_ch_images, ch_keys
 
 
-def load_sources(data_h5: str | None, model_h5: str | None):
-    """Load from data.h5 + model H5, or from a single legacy interactive.h5.
+def _merge_data_h5s(paths: list[str]):
+    """Load and merge multiple data.h5 files (one per dataset).
 
-    Two-file mode  (data_h5 AND model_h5 provided):
-      • images + raw patches come from data_h5
-      • latents / UMAP / predictions / recon come from model_h5
-      • static columns (mean_intensity, annotation_label) merged from data_h5
+    Returns (df_merged, stem_to_patch, images_raw, img_meta,
+             pad_size, image_scale, extra_ch_images, ch_keys).
 
-    Single-file mode (only model_h5 provided):
-      • backward-compatible: reads everything from one interactive.h5
-
-    Returns the same 9-tuple as the old load_h5().
+    stem_to_patch maps patch filename stem → (patch_array, row_index_in_that_array).
+    images_raw and img_meta are concatenated across datasets with frame indices updated.
+    Results are cached in _DATA_CACHE so model switches don't reload patches.
     """
-    if data_h5 and model_h5:
-        print(f'[view] data  : {data_h5}')
-        print(f'[view] model : {model_h5}')
+    cache_key = tuple(sorted(paths))
+    if cache_key in _DATA_CACHE:
+        print(f'[view] data cache hit ({len(paths)} files)')
+        return _DATA_CACHE[cache_key]
+
+    all_dfs, all_img_raw, all_img_meta = [], [], []
+    stem_to_patch: dict[str, tuple[np.ndarray, int]] = {}
+    pad_size = image_scale = None
+    extra_ch_images: dict[str, np.ndarray] = {}
+    ch_keys: list[str] = ['pax']
+    frame_offset = 0
+
+    for p in paths:
+        print(f'[view] data  : {p}')
+        df_d, pr_d, im_d, imm_d, pad_d, scale_d, extra_d, ckeys_d = _read_h5_data(p)
+        if pad_size is None:
+            pad_size = pad_d
+            image_scale = scale_d
+            ch_keys = ckeys_d
+            extra_ch_images = {k: v for k, v in extra_d.items()}
+
+        all_dfs.append(df_d)
+
+        if pr_d is not None:
+            stems = df_d['filename'].apply(lambda f: Path(str(f)).stem)
+            for i, stem in enumerate(stems):
+                stem_to_patch[str(stem)] = (pr_d, i)
+
+        if im_d is not None and imm_d is not None:
+            all_img_raw.append(im_d)
+            imm_shifted = imm_d.copy()
+            imm_shifted['frame'] = imm_shifted['frame'] + frame_offset
+            all_img_meta.append(imm_shifted)
+            frame_offset += len(im_d)
+
+    df_merged = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
+    images_raw = np.concatenate(all_img_raw, axis=0) if all_img_raw else None
+    img_meta   = pd.concat(all_img_meta, ignore_index=True) if all_img_meta else None
+
+    result = (df_merged, stem_to_patch, images_raw, img_meta,
+              pad_size or 64, image_scale or 1.0, extra_ch_images, ch_keys)
+    _DATA_CACHE[cache_key] = result
+    return result
+
+
+def load_sources(data_h5: str | list[str] | None, model_h5: str | None):
+    """Load from data.h5(s) + model H5, or from a single legacy interactive.h5.
+
+    data_h5 may be a single path or a list of paths (one per dataset).
+    model_h5 preferentially reads meta/cross_ds_latents_csv (all 4 datasets),
+    falling back to meta/latents_csv (training only) or meta/csv (legacy).
+
+    Returns 11-tuple: (df, patches_raw, patches_recon, images_raw, img_meta,
+                       pad_size, image_scale, result_dir, plots,
+                       extra_ch_images, ch_keys).
+    """
+    # Normalise data_h5 to a list
+    if isinstance(data_h5, str):
+        data_h5_list = [data_h5]
+    elif data_h5:
+        data_h5_list = [p for p in data_h5 if p]
+    else:
+        data_h5_list = []
+
+    if data_h5_list and model_h5:
         df_model, pr_model, patches_recon, im_model, imm_model, pad_m, scale_m, result_dir, plots = \
             _read_h5_model(model_h5)
-        df_data, pr_data, im_data, imm_data, pad_d, scale_d, extra_ch_images, ch_keys = \
-            _read_h5_data(data_h5)
+        (df_data, stem_to_patch, images_raw, img_meta,
+         pad_size, image_scale, extra_ch_images, ch_keys) = _merge_data_h5s(data_h5_list)
 
-        # Prefer data.h5 for images (higher quality / all conditions)
-        images_raw = im_data   if im_data   is not None else im_model
-        img_meta   = imm_data  if imm_data  is not None else imm_model
-        pad_size   = pad_d
-        image_scale = scale_d
+        # Prefer data.h5 for images
+        images_raw  = images_raw  if images_raw  is not None else im_model
+        img_meta    = img_meta    if img_meta    is not None else imm_model
 
-        # Merge static columns from data.h5 into model df (join on filename)
+        # Determine join key: cross_ds_latents_csv uses 'name' (stem),
+        # older latents.csv uses 'filename' (full path).
+        model_key_col  = 'name'     if 'name'     in df_model.columns else 'filename'
+        data_stem_col  = df_data['filename'].apply(lambda f: Path(str(f)).stem) \
+                         if 'filename' in df_data.columns else df_data.get('name', pd.Series())
+
+        # Merge static columns from data.h5 (mean_intensity, annotation, position)
         static_cols = [c for c in ('filename', 'mean_intensity',
                                    'annotation_label', 'annotation_label_name',
                                    'canvas_cx', 'canvas_cy', 'ps')
                        if c in df_data.columns]
-        # drop cols already in df_model to avoid duplicate suffixes
-        drop_from_data = [c for c in static_cols if c != 'filename' and c in df_model.columns]
-        df = df_model.merge(df_data[static_cols].drop(columns=drop_from_data),
-                            on='filename', how='left')
+        df_data_static = df_data[static_cols].copy()
+        df_data_static['_stem'] = data_stem_col
+        drop_from_data = [c for c in static_cols
+                          if c != 'filename' and c in df_model.columns]
+        df_model['_stem'] = (df_model[model_key_col].apply(lambda f: Path(str(f)).stem)
+                             if model_key_col == 'filename'
+                             else df_model[model_key_col])
+        df = df_model.merge(
+            df_data_static.drop(columns=drop_from_data).rename(columns={'filename': '_data_fn'}),
+            on='_stem', how='left',
+        ).drop(columns=['_stem'], errors='ignore')
 
-        # Reindex patches_raw from data.h5 to match model df row order
-        if pr_data is not None:
-            fname_to_idx = {str(fn): i for i, fn in enumerate(df_data['filename'])}
-            h, w = pr_data.shape[1], pr_data.shape[2]
-            patches_raw = np.zeros((len(df), h, w), dtype=pr_data.dtype)
-            for i, fn in enumerate(df['filename']):
-                j = fname_to_idx.get(str(fn))
-                if j is not None:
-                    patches_raw[i] = pr_data[j]
+        # Build patches_raw array aligned to model df row order
+        if stem_to_patch:
+            # Determine patch shape from first available entry
+            sample_arr, sample_idx = next(iter(stem_to_patch.values()))
+            h, w = sample_arr.shape[1], sample_arr.shape[2]
+            patches_raw = np.zeros((len(df), h, w), dtype=sample_arr.dtype)
+            for i, stem in enumerate(df['_stem'] if '_stem' in df.columns
+                                     else df[model_key_col].apply(
+                                         lambda f: Path(str(f)).stem)):
+                entry = stem_to_patch.get(str(stem))
+                if entry is not None:
+                    arr, j = entry
+                    patches_raw[i] = arr[j]
         else:
             patches_raw = pr_model
 
-        return df, patches_raw, patches_recon, images_raw, img_meta, pad_size, image_scale, result_dir, plots, extra_ch_images, ch_keys
+        return (df, patches_raw, patches_recon, images_raw, img_meta,
+                pad_size, image_scale, result_dir, plots, extra_ch_images, ch_keys)
 
     elif model_h5:
         print(f'[view] Loading (single-file) {model_h5}')
         nine = _read_h5_model(model_h5)
         return nine + ({}, ['pax'])
 
-    elif data_h5:
-        print(f'[view] Loading (data-only) {data_h5}')
-        df_data, patches_raw, images_raw, img_meta, pad_size, image_scale, extra_ch_images, ch_keys = _read_h5_data(data_h5)
-        return df_data, patches_raw, None, images_raw, img_meta, pad_size, image_scale, Path(''), {}, extra_ch_images, ch_keys
+    elif data_h5_list:
+        print(f'[view] Loading (data-only) {len(data_h5_list)} file(s)')
+        (df_data, stem_to_patch, images_raw, img_meta,
+         pad_size, image_scale, extra_ch_images, ch_keys) = _merge_data_h5s(data_h5_list)
+        # Build ordered patches_raw array
+        if stem_to_patch and 'filename' in df_data.columns:
+            sample_arr, _ = next(iter(stem_to_patch.values()))
+            h, w = sample_arr.shape[1], sample_arr.shape[2]
+            patches_raw = np.zeros((len(df_data), h, w), dtype=sample_arr.dtype)
+            for i, fn in enumerate(df_data['filename']):
+                stem = Path(str(fn)).stem
+                entry = stem_to_patch.get(stem)
+                if entry is not None:
+                    arr, j = entry
+                    patches_raw[i] = arr[j]
+        else:
+            patches_raw = None
+        return (df_data, patches_raw, None, images_raw, img_meta,
+                pad_size, image_scale, Path(''), {}, extra_ch_images, ch_keys)
 
     else:
         raise ValueError('At least one H5 path is required.')
@@ -296,7 +402,7 @@ def _legend_html() -> str:
 
 # ── Main app ──────────────────────────────────────────────────────────────────
 
-def build_app(data_h5: str | None = None,
+def build_app(data_h5: str | list[str] | None = None,
               model_h5: str | None = None) -> pn.viewable.Viewable:
     (df, patches_raw, patches_recon,
      images_raw, img_meta, pad_size, image_scale, result_dir, plots,
@@ -419,11 +525,18 @@ def build_app(data_h5: str | None = None,
                          .fillna('').astype(str).values),
             fa_pred   = fa_pred.values,
             pos_pred  = pos_pred.values,
-            filename  = df['filename'].astype(str).values,
+            filename  = (df['filename'] if 'filename' in df.columns
+                         else df.get('name', pd.Series(['?'] * n))).astype(str).values,
             color_fa  = [_label_color(v, FA_COLOR_MAP)  for v in fa_pred],
             color_pos = [_label_color(v, POS_COLOR_MAP) for v in pos_pred],
         )
         umap_data['color'] = list(umap_data['color_fa'])
+        umap_data['dataset'] = (df['dataset'].fillna('unknown').astype(str).values
+                                if 'dataset' in df.columns else np.array(['?'] * n))
+        umap_data['split']   = (df['split'].fillna('?').astype(str).values
+                                if 'split'   in df.columns else np.array(['?'] * n))
+        umap_data['color_ds'] = [_DS_PALETTE.get(d, '#9467bd')
+                                 for d in umap_data['dataset']]
         has_b64 = 'raw_b64' in df.columns
         if has_b64:
             umap_data['raw_b64']   = df['raw_b64'].values
@@ -431,23 +544,47 @@ def build_app(data_h5: str | None = None,
 
         umap_src = ColumnDataSource(umap_data)
 
-        # UMAP filter toggle
+        # ── Dataset filter select ─────────────────────────────────────────────
+        _split_arr = umap_data['split']
+        _ds_arr    = umap_data['dataset']
+        _known_ds  = sorted(s for s in set(_ds_arr) if s not in ('?', 'unknown'))
+        _ds_options = ['Training'] + _known_ds + ['All']
+        _has_train  = any(s in ('train', 'val') for s in _split_arr)
+        ds_select = pn.widgets.Select(
+            name='Dataset', options=_ds_options,
+            value='Training' if _has_train else 'All',
+            width=160,
+        )
+
+        # UMAP labeled-only toggle
         umap_filter = pn.widgets.RadioButtonGroup(
             options=['All patches', 'Labeled only'], value='All patches', width=230,
         )
-        _umap_all_data = {k: np.array(v) for k, v in umap_data.items()}
         if 'annotation_label' in df.columns:
             labeled_mask = df['annotation_label'].fillna(-1).values >= 0
         else:
             labeled_mask = np.ones(n, dtype=bool)
-        _umap_labeled_data = {k: v[labeled_mask] for k, v in _umap_all_data.items()}
 
-        def _on_umap_filter(event):
-            if event.new == 'Labeled only':
-                umap_src.data = dict(_umap_labeled_data)
+        _umap_base = {k: np.array(v) for k, v in umap_data.items()}
+
+        def _compute_umap_mask():
+            val = ds_select.value
+            if val == 'Training':
+                ds_mask = np.isin(_umap_base['split'], ['train', 'val'])
+            elif val == 'All':
+                ds_mask = np.ones(n, dtype=bool)
             else:
-                umap_src.data = dict(_umap_all_data)
-        umap_filter.param.watch(_on_umap_filter, 'value')
+                ds_mask = (_umap_base['dataset'] == val)
+            lab_mask = labeled_mask if umap_filter.value == 'Labeled only' else np.ones(n, dtype=bool)
+            return ds_mask & lab_mask
+
+        def _update_umap_src(event=None):
+            idxs = np.where(_compute_umap_mask())[0]
+            umap_src.data = {k: v[idxs] for k, v in _umap_base.items()}
+
+        ds_select.param.watch(_update_umap_src, 'value')
+        umap_filter.param.watch(_update_umap_src, 'value')
+        _update_umap_src()  # apply initial filter (Training by default)
 
         # Single big dot on UMAP -- updated when user clicks the image panel
         highlight_src = ColumnDataSource({'x': [], 'y': [], 'color': []})
@@ -510,24 +647,27 @@ def build_app(data_h5: str | None = None,
         # Colour-by selector (pure JS -- no server round-trip)
         color_select = Select(
             title='Colour by', value='fa_pred',
-            options=[('fa_pred', 'FA type'), ('pos_pred', 'Position')],
+            options=[('fa_pred', 'FA type'), ('pos_pred', 'Position'),
+                     ('dataset', 'Dataset')],
             width=180,
         )
         color_select.js_on_change('value', CustomJS(
             args=dict(src=umap_src, plot=p_umap), code="""
             const d = src.data;
-            d['color'] = (cb_obj.value === 'fa_pred')
-                ? [...d['color_fa']] : [...d['color_pos']];
+            const col_key = {fa_pred: 'color_fa', pos_pred: 'color_pos',
+                             dataset: 'color_ds'}[cb_obj.value] || 'color_fa';
+            d['color'] = [...d[col_key]];
             src.change.emit();
-            const lbl = (cb_obj.value === 'fa_pred') ? 'FA type' : 'Position';
+            const lbl = {fa_pred: 'FA type', pos_pred: 'Position',
+                         dataset: 'Dataset'}[cb_obj.value] || cb_obj.value;
             plot.title.text = 'UMAP  -- ' + lbl
                 + '  (hover = patch tooltip  |  tap = detail panel)';
         """))
 
         left_col = pn.Column(
-            pn.Row(pn.pane.Bokeh(color_select), umap_filter),
+            pn.Row(pn.pane.Bokeh(color_select), umap_filter, ds_select),
             pn.pane.Bokeh(p_umap),
-            width=540,
+            width=580,
         )
     # end if/else data_only
 
@@ -1023,69 +1163,178 @@ def build_app(data_h5: str | None = None,
     )
 
 
-def _get_cli_paths() -> tuple[str | None, str | None]:
-    """Return (data_h5, model_h5) from CLI/session args.
+def _get_cli_paths() -> tuple[list[str], list[str]]:
+    """Return (data_h5_list, model_h5_list) from CLI/session args.
 
-    Accepted forms:
-      --args data.h5 model.h5   → two-file mode
-      --args model.h5           → single-file legacy mode
-      (no args)                 → show loader UI
+    Supported forms:
+
+      --model   flag (recommended for multi-model):
+        data1.h5 data2.h5 … --model model_A/model.h5 --model model_B/model.h5
+        All positional args = data.h5 files; --model values = models.
+
+      Positional only (backward-compat, single model):
+        data1.h5 … dataN.h5 model.h5   → last arg = model, rest = data
+        model.h5                        → legacy single-file mode
+        (no args)                       → show loader UI
     """
     def _decode(a):
         return a.decode() if isinstance(a, bytes) else str(a)
 
-    sess  = pn.state.session_args
-    raw   = sess.get('args', []) or []
+    sess = pn.state.session_args
+    raw  = sess.get('args', []) or []
     parts = [_decode(a) for a in raw] if raw else sys.argv[1:]
 
-    if len(parts) >= 2:
-        return parts[0], parts[1]
-    if len(parts) == 1:
-        return None, parts[0]
-    return None, None
+    # Parse --model flags manually (works for both panel serve and __main__)
+    model_paths: list[str] = []
+    data_paths:  list[str] = []
+    i = 0
+    while i < len(parts):
+        if parts[i] in ('--model', '-m') and i + 1 < len(parts):
+            model_paths.append(parts[i + 1])
+            i += 2
+        elif parts[i].startswith('-'):
+            i += 1   # skip unknown flags (panel/bokeh flags that may bleed through)
+        else:
+            data_paths.append(parts[i])
+            i += 1
+
+    if model_paths:
+        return data_paths, model_paths
+
+    # Backward-compat: no --model flags → last positional = model
+    if not data_paths:
+        return [], []
+    if len(data_paths) == 1:
+        return [], data_paths   # single arg treated as model.h5
+    return data_paths[:-1], [data_paths[-1]]
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def build_loader_app() -> pn.viewable.Viewable:
-    """Landing page with two file-path inputs + Load button; replaces itself on load."""
-    data_input = pn.widgets.TextInput(
-        name='1. Dataset H5  (data.h5 — patches + images)',
-        placeholder='/path/to/ae_results/patches/cio/{ds}/data.h5',
-        width=680,
+_DS_LABELS = [
+    ('vinc',   'vinc   data.h5'),
+    ('ppax',   'ppax   data.h5'),
+    ('pfak',   'pfak   data.h5'),
+    ('nih3t3', 'nih3t3 data.h5'),
+]
+
+def build_multi_app(data_h5_list: list[str], model_h5_list: list[str]) -> pn.viewable.Viewable:
+    """Viewer with a model-selector button bar when multiple model.h5 paths are given.
+
+    For a single model, delegates directly to build_app (no extra UI chrome).
+    Data files are cached after first load so switching models is fast.
+    """
+    if len(model_h5_list) == 1:
+        return build_app(data_h5=data_h5_list or None, model_h5=model_h5_list[0])
+
+    def _model_label(path: str) -> str:
+        p = Path(path)
+        return p.parent.name if p.name == 'model.h5' else p.stem
+
+    labels = [_model_label(p) for p in model_h5_list]
+
+    main_area  = pn.Column(sizing_mode='stretch_width')
+    status_bar = pn.pane.Markdown('', width=700)
+
+    # Build buttons first so the click callbacks can reference them all
+    btn_list: list[pn.widgets.Button] = []
+    for label in labels:
+        btn_list.append(pn.widgets.Button(
+            name=label, button_type='light', width=220, margin=(3, 4),
+        ))
+
+    def _load_model(model_h5: str, label: str, active_btn: pn.widgets.Button):
+        for b in btn_list:
+            b.button_type = 'success' if b is active_btn else 'light'
+        status_bar.object = f'Loading **{label}** …'
+        try:
+            content = build_app(data_h5=data_h5_list or None, model_h5=model_h5)
+            main_area.objects = [content]
+            status_bar.object = f'Showing: **{label}**'
+        except Exception as exc:
+            main_area.objects = [pn.pane.Alert(
+                f'Error loading {label}: {exc}', alert_type='danger')]
+            status_bar.object = f'**Error** loading {label}'
+            active_btn.button_type = 'danger'
+
+    for btn, path, label in zip(btn_list, model_h5_list, labels):
+        btn.on_click(lambda e, p=path, l=label, b=btn: _load_model(p, l, b))
+
+    selector_row = pn.Row(
+        pn.pane.HTML('<b style="line-height:2.2;">Model:</b>', width=55),
+        *btn_list,
+        status_bar,
+        sizing_mode='stretch_width',
     )
-    model_input = pn.widgets.TextInput(
-        name='2. Model H5  (interactive.h5 / model.h5 — latents, UMAP, predictions)',
-        placeholder='/path/to/ae_results/…/interactive.h5',
-        width=680,
+
+    # Load first model immediately
+    btn_list[0].button_type = 'success'
+    try:
+        content = build_app(data_h5=data_h5_list or None, model_h5=model_h5_list[0])
+        main_area.objects = [content]
+        status_bar.object = f'Showing: **{labels[0]}**'
+    except Exception as exc:
+        main_area.objects = [pn.pane.Alert(
+            f'Error loading {labels[0]}: {exc}', alert_type='danger')]
+        btn_list[0].button_type = 'danger'
+
+    return pn.Column(selector_row, main_area, sizing_mode='stretch_width')
+
+
+def build_loader_app() -> pn.viewable.Viewable:
+    """Landing page: 4 dataset H5 inputs + 1 model H5 input + Load button."""
+    ds_inputs = {
+        ds: pn.widgets.TextInput(
+            name=f'{label}  (patches + images)',
+            placeholder=f'/path/to/ae_results/patches/cio/{ds}/data.h5',
+            width=700,
+        )
+        for ds, label in _DS_LABELS
+    }
+    model_input = pn.widgets.TextAreaInput(
+        name='Model H5 paths  (one per line — enter multiple to compare models)',
+        placeholder=('/path/to/ae_results/contrastive_run/<model1>/model.h5\n'
+                     '/path/to/ae_results/contrastive_run/<model2>/model.h5'),
+        width=700, height=100,
     )
     load_btn  = pn.widgets.Button(name='Load', button_type='primary', width=100)
     status_md = pn.pane.Markdown('', width=800)
     container = pn.Column(
         pn.pane.HTML('<h2>Interactive Patch Viewer</h2>', sizing_mode='stretch_width'),
         pn.pane.HTML(
-            '<p style="color:#888;">Provide both paths for two-file mode, '
-            'or only the Model H5 for legacy single-file mode.</p>',
+            '<p style="color:#888;">'
+            'Enter the data.h5 paths for whichever datasets you want visible '
+            '(at least one), plus one or more model.h5 paths (one per line). '
+            'Multiple models show a selector bar for quick switching. '
+            'Leave dataset fields blank to omit that dataset.</p>',
             sizing_mode='stretch_width',
         ),
-        data_input,
+        *ds_inputs.values(),
         model_input,
         pn.Row(load_btn, status_md),
     )
 
     def _on_load(_):
-        dp = data_input.value.strip() or None
-        mp = model_input.value.strip() or None
-        if not dp and not mp:
+        data_paths  = [w.value.strip() for w in ds_inputs.values() if w.value.strip()]
+        model_paths = [p.strip() for p in model_input.value.splitlines()
+                       if p.strip()]
+        if not data_paths and not model_paths:
             status_md.object = '*Enter at least one H5 path.*'
             return
-        for label, p in [('Dataset H5', dp), ('Model H5', mp)]:
-            if p and not Path(p).exists():
-                status_md.object = f'*{label} not found: `{p}`*'
+        for p in data_paths:
+            if not Path(p).exists():
+                status_md.object = f'*Dataset H5 not found: `{p}`*'
+                return
+        for p in model_paths:
+            if not Path(p).exists():
+                status_md.object = f'*Model H5 not found: `{p}`*'
                 return
         status_md.object = 'Loading …'
         try:
-            app = build_app(data_h5=dp, model_h5=mp)
+            if model_paths:
+                app = build_multi_app(data_paths, model_paths)
+            else:
+                app = build_app(data_h5=data_paths or None, model_h5=None)
             container.objects = [app]
         except Exception as exc:
             status_md.object = f'**Error:** `{exc}`'
@@ -1095,9 +1344,9 @@ def build_loader_app() -> pn.viewable.Viewable:
 
 
 if pn.state.served:
-    _data_h5, _model_h5 = _get_cli_paths()
-    if _data_h5 or _model_h5:
-        build_app(data_h5=_data_h5, model_h5=_model_h5).servable()
+    _data_h5_list, _model_h5_list = _get_cli_paths()
+    if _data_h5_list or _model_h5_list:
+        build_multi_app(_data_h5_list, _model_h5_list).servable()
     else:
         build_loader_app().servable()
 
@@ -1105,22 +1354,58 @@ if __name__ == '__main__':
     import argparse
     import socket as _socket
 
-    ap = argparse.ArgumentParser(description='Interactive FA patch viewer.')
-    ap.add_argument('h5', nargs='*', help='data.h5 [model.h5]  (0–2 files)')
+    ap = argparse.ArgumentParser(
+        description='Interactive FA patch viewer.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''\
+Examples:
+  # 4 datasets + one model:
+  python scripts/view_interactive.py \\
+      /path/patches/cio/vinc/data.h5 \\
+      /path/patches/cio/ppax/data.h5 \\
+      /path/patches/cio/pfak/data.h5 \\
+      /path/patches/cio/nih3t3/data.h5 \\
+      --model /path/contrastive_run/modelA/model.h5
+
+  # 4 datasets + multiple models (button-bar switcher):
+  python scripts/view_interactive.py \\
+      /path/patches/cio/vinc/data.h5 \\
+      /path/patches/cio/ppax/data.h5 \\
+      /path/patches/cio/pfak/data.h5 \\
+      /path/patches/cio/nih3t3/data.h5 \\
+      --model /path/contrastive_run/modelA/model.h5 \\
+      --model /path/contrastive_run/modelB/model.h5 \\
+      --model /path/contrastive_run/modelC/model.h5
+
+  # Legacy single-file:
+  python scripts/view_interactive.py /path/interactive.h5
+''',
+    )
+    ap.add_argument('h5', nargs='*',
+                    help='data.h5 files (one per dataset); or a single legacy '
+                         'interactive.h5 if no --model is given.')
+    ap.add_argument('--model', dest='models', action='append', default=[],
+                    metavar='MODEL_H5',
+                    help='model.h5 path; repeat to compare multiple models.')
     ap.add_argument('--port',  type=int, default=5006)
     ap.add_argument('--serve', action='store_true',
                     help='Bind to 0.0.0.0 for network access (others connect via IP)')
     _args = ap.parse_args()
 
-    if len(_args.h5) >= 2:
-        _data_h5, _model_h5 = _args.h5[0], _args.h5[1]
+    if _args.models:
+        # Explicit --model flags: all positional args are data.h5
+        _data_h5_list  = _args.h5
+        _model_h5_list = _args.models
+    elif len(_args.h5) >= 2:
+        # Backward-compat: last positional = model
+        _data_h5_list, _model_h5_list = _args.h5[:-1], [_args.h5[-1]]
     elif len(_args.h5) == 1:
-        _data_h5, _model_h5 = None, _args.h5[0]
+        _data_h5_list, _model_h5_list = [], [_args.h5[0]]
     else:
-        _data_h5, _model_h5 = None, None
+        _data_h5_list, _model_h5_list = [], []
 
-    _app = (build_app(data_h5=_data_h5, model_h5=_model_h5)
-            if (_data_h5 or _model_h5) else build_loader_app())
+    _app = (build_multi_app(_data_h5_list, _model_h5_list)
+            if (_data_h5_list or _model_h5_list) else build_loader_app())
 
     if _args.serve:
         try:
