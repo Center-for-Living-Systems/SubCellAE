@@ -61,13 +61,131 @@ ALL_DATASETS   = list(DS_CHANNEL.keys())
 ALL_CONDITIONS = ["control", "ycomp"]
 ALL_NORMS      = ["cio", "cio_rb"]
 
+# Raw CZI folder per dataset/condition for robust re-normalization
+_FA = DATA_ROOT / "fa_data/other_paxillin"
+DS_RAW_FOLDERS: dict[str, dict[str, Path]] = {
+    "vinc": {
+        "control": _FA / "20250311_eGFPZyxin488_Phalloidin405_Vinculin(rb)647_paxillin(m)568/Control",
+        "ycomp":   _FA / "20250311_eGFPZyxin488_Phalloidin405_Vinculin(rb)647_paxillin(m)568/Ycomp",
+    },
+    "pfak": {
+        "control": _FA / "20250720_eGFP-Zyxin 488, Phalloidin 405, pFAK (rb) 647, paxillin(m)568/072025/Control",
+        "ycomp":   _FA / "20250720_eGFP-Zyxin 488, Phalloidin 405, pFAK (rb) 647, paxillin(m)568/072025/Ycomp",
+    },
+    "ppax": {
+        "control": _FA / "20250721_eGFP-Zyxin 488_Phalloidin405_pPaxy118(rb) 647_Pax(m)568/Control",
+        "ycomp":   _FA / "20250721_eGFP-Zyxin 488_Phalloidin405_pPaxy118(rb) 647_Pax(m)568/Y-comp",
+    },
+    "nih3t3": {
+        "control": _FA / "20260227_NIH3T3_ZyxinGFP,Phalloidin405,Vinc_rb647,Pax_m555_reduced_size_AH/Control",
+        "ycomp":   _FA / "20260227_NIH3T3_ZyxinGFP,Phalloidin405,Vinc_rb647,Pax_m555_reduced_size_AH/YCompound",
+    },
+}
+# All datasets share the same patchprep segmentation parameters
+_SEG_PARAMS = dict(
+    seg_ch=1, threshold=0.1, close_size=11,
+    min_size_initial=3, min_size_post_close=10, min_size_final=30000,
+)
+# Rolling-ball radius: None for cio, 20 for cio_rb
+_ROLLING_BALL = {"cio": None, "cio_rb": 20}
+
 import re
+from collections import defaultdict
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import subcellae.dataprep.patch_prep as _pp
+
 _PATCH_RE = re.compile(r'^(.+)_f(\d+)x(\d+)y(\d+)ps(\d+)$')
 
 
 def _parse_patch(stem: str):
     m = _PATCH_RE.match(stem)
     return (m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5))) if m else None
+
+
+def _compute_robust_patches(
+    records: list[dict],
+    ds: str,
+    conditions: list[str],
+    norm: str,
+) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
+    """Re-normalize patches from raw CZI frames using trimmed-mean and median variants.
+
+    Returns (patches_inlier, patches_med), each float32 (N, 32, 32), aligned with
+    *records* order. Returns (None, None) if raw folders are unavailable.
+    """
+    if ds not in DS_RAW_FOLDERS:
+        print(f"  [robust] no raw folder mapping for ds={ds!r}, skipping", flush=True)
+        return None, None
+
+    rolling_ball_radius = _ROLLING_BALL.get(norm)
+    scale = 5.0  # matches patchprep default norm_cell_scale
+
+    # index records by (condition, frame_idx) → list of (record_pos, x_c, y_c, ps)
+    frame_map: dict[tuple[str, int], list[tuple[int, int, int, int]]] = defaultdict(list)
+    for i, rec in enumerate(records):
+        cond = rec["condition_name"]
+        fi   = rec["frame_idx"]
+        x_c  = rec["canvas_cx"] + PAD_SIZE
+        y_c  = rec["canvas_cy"] + PAD_SIZE
+        ps   = rec["ps"]
+        frame_map[(cond, fi)].append((i, x_c, y_c, ps))
+
+    patches_inlier = np.zeros((len(records), 32, 32), dtype=np.float32)
+    patches_med    = np.zeros((len(records), 32, 32), dtype=np.float32)
+
+    for cond in conditions:
+        raw_folder = DS_RAW_FOLDERS[ds].get(cond)
+        if raw_folder is None or not raw_folder.exists():
+            print(f"  [robust] raw folder missing for {ds}/{cond}: {raw_folder}", flush=True)
+            continue
+
+        filenames = _pp.list_image_files(str(raw_folder), file_type="czi")
+        if not filenames:
+            print(f"  [robust] no CZI files in {raw_folder}", flush=True)
+            continue
+
+        # collect unique frame indices for this condition
+        cond_frame_idxs = sorted({fi for (c, fi) in frame_map if c == cond})
+        print(f"  [robust] {ds}/{cond}: re-normalising {len(cond_frame_idxs)} frames …", flush=True)
+
+        for fi in cond_frame_idxs:
+            if fi >= len(filenames):
+                print(f"    WARNING: frame_idx={fi} out of range ({len(filenames)} files)", flush=True)
+                continue
+
+            filename = filenames[fi]
+            raw = _pp._load_raw_squeezed(str(raw_folder), filename, "czi")
+
+            # rolling ball on pax channel (ch1) before segmentation
+            img = _pp._extract_channel(raw, 1, filename, "czi")
+            if rolling_ball_radius is not None:
+                _s = 255.0 * 255.0
+                img = _pp.apply_rolling_ball(img * _s, radius=rolling_ball_radius) / _s
+
+            seg_input = _pp._extract_channel(raw, _SEG_PARAMS["seg_ch"], filename, "czi")
+            seg = _pp.segment_cell_mask(
+                seg_input,
+                threshold=_SEG_PARAMS["threshold"],
+                close_size=_SEG_PARAMS["close_size"],
+                min_size_initial=_SEG_PARAMS["min_size_initial"],
+                min_size_post_close=_SEG_PARAMS["min_size_post_close"],
+                min_size_final=_SEG_PARAMS["min_size_final"],
+            ).astype(float)
+
+            img_inlier = _pp.normalize_cell_insideoutside_inlier(img, seg, scale=scale)
+            img_med    = _pp.normalize_cell_insideoutside_med(img, seg, scale=scale)
+
+            img_inlier_pad = _pp.image_padding(img_inlier, PAD_SIZE, float(np.mean(img_inlier)))
+            img_med_pad    = _pp.image_padding(img_med,    PAD_SIZE, float(np.mean(img_med)))
+
+            for (rec_i, x_c, y_c, ps) in frame_map[(cond, fi)]:
+                half = ps // 2
+                r0, r1 = y_c - half, y_c + half
+                c0, c1 = x_c - half, x_c + half
+                patches_inlier[rec_i] = img_inlier_pad[r0:r1, c0:c1].astype(np.float32)
+                patches_med[rec_i]    = img_med_pad[r0:r1, c0:c1].astype(np.float32)
+
+    return patches_inlier, patches_med
 
 
 def _load_frames(frame_dir: Path, cond: str, frame_indices: list[int],
@@ -205,10 +323,22 @@ def pack_dataset(ds: str, conditions: list[str], norm: str = "cio",
     patches_all = np.concatenate(all_patches, axis=0)
     print(f"\n  {ds}: total patches={len(patches_all)}, frames={global_frame_idx}", flush=True)
 
+    # Robust normalization variants from raw frames
+    patches_inlier, patches_med = _compute_robust_patches(
+        all_records, ds, conditions, norm
+    )
+
     out_dir.mkdir(parents=True, exist_ok=True)
     with h5py.File(str(out_path), "w") as f:
         f.create_dataset("patches/raw", data=patches_all,
                          compression="gzip", compression_opts=4)
+
+        if patches_inlier is not None:
+            f.create_dataset("patches/cio_inlier", data=patches_inlier,
+                             compression="gzip", compression_opts=4)
+            f.create_dataset("patches/cio_med", data=patches_med,
+                             compression="gzip", compression_opts=4)
+            print(f"  patches/cio_inlier and patches/cio_med saved", flush=True)
 
         if "pax" in frame_arrays and frame_arrays["pax"]:
             stack = np.stack(frame_arrays["pax"])

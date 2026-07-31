@@ -588,6 +588,64 @@ def normalize_cell_insideoutside(
     return int1 / (denom * scale)
 
 
+def normalize_cell_insideoutside_inlier(
+    img: np.ndarray,
+    seg: np.ndarray,
+    scale: float = 5.0,
+    q_lo: float = 1.0,
+    q_hi: float = 99.0,
+) -> np.ndarray:
+    """CIO normalization using trimmed mean (exclude <q_lo% and >q_hi% per region).
+
+    Reduces sensitivity to bright artefacts (dust, other cells) in the outside
+    region and to very dim pixels inside by trimming the distribution tails before
+    computing the reference mean.
+    """
+    outside = seg == 0
+    inside  = seg > 0
+
+    def _trimmed_mean(px: np.ndarray) -> float:
+        if len(px) == 0:
+            return 0.0
+        lo, hi = np.percentile(px, [q_lo, q_hi])
+        keep = px[(px >= lo) & (px <= hi)]
+        return float(np.mean(keep)) if len(keep) > 0 else float(np.mean(px))
+
+    mean_outside = _trimmed_mean(img[outside]) if outside.any() else 0.0
+    mean_inside  = _trimmed_mean(img[inside])  if inside.any()  else mean_outside + 1.0
+
+    int1  = img - mean_outside
+    denom = mean_inside - mean_outside
+    if denom == 0.0:
+        denom = 1.0
+
+    return int1 / (denom * scale)
+
+
+def normalize_cell_insideoutside_med(
+    img: np.ndarray,
+    seg: np.ndarray,
+    scale: float = 5.0,
+) -> np.ndarray:
+    """CIO normalization using median instead of mean for both inside and outside regions.
+
+    More robust than mean to bright artefact spots (other cells, dust) in the
+    outside region when those are a minority of pixels.
+    """
+    outside = seg == 0
+    inside  = seg > 0
+
+    mean_outside = float(np.median(img[outside])) if outside.any() else 0.0
+    mean_inside  = float(np.median(img[inside]))  if inside.any()  else mean_outside + 1.0
+
+    int1  = img - mean_outside
+    denom = mean_inside - mean_outside
+    if denom == 0.0:
+        denom = 1.0
+
+    return int1 / (denom * scale)
+
+
 def normalize_cell_minmax(
     img: np.ndarray,
     seg: np.ndarray,
