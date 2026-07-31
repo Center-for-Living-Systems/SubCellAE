@@ -8,37 +8,46 @@ This is the static half of the two-file H5 design:
   data.h5   ← this script  (images + patches, shared across models)
   model.h5  ← pack_model_h5.py  (latents, UMAP, recon, predictions)
 
-Sources (cio_rb, mr10 patchprep):
-  ae_results/patches/cio_rb/{ds}/{cond}/tiff_patches32_mr10/*.tif
-  ae_results/source_frames/cio_rb/{ds}/{cond}/{cond}_f{N}_{ch}.tif
+Canvas images are generated from raw CZI files using the same cell-based
+normalisation as the patches, so that patch pixel values and canvas pixel
+values are on the same scale.
+
+Sources:
+  Raw CZI files  → normalise → patches/cio_inlier, patches/cio_med, images/*
+  Pre-computed TIFFs (tiff_patches32_mr10) → patches/raw
+
+CZI channel order (all four datasets share this layout):
+  ch0 : marker channel  (vinculin / pPax / pFAK)
+  ch1 : paxillin        (used for segmentation)
+  ch2 : zyxin
+  ch3 : actin
 
 Output:
-  ae_results/patches/cio_rb/{ds}/data.h5
+  {patches_root}/{ds}/data.h5
 
 H5 layout
 ---------
-  patches/raw       float32 (N, 32, 32)   — all conditions combined
-  images/raw        float32 (M, H, W)     — paxillin frames, all conditions
-  images/{ch}       float32 (M, H, W)     — one dataset per additional channel
-  images/meta       bytes (CSV)           — group, frame (row in images/raw),
-                                            condition_name, frame_idx
-  meta/csv          bytes (CSV)           — per-patch static metadata:
-                                            filename, condition_name, group,
-                                            frame_idx, canvas_cx, canvas_cy, ps,
-                                            mean_intensity, annotation_label,
-                                            annotation_label_name
+  patches/raw        float32 (N, 32, 32)  — pre-computed patchprep TIFFs
+  patches/cio_inlier float32 (N, 32, 32)  — inlier-normed from raw CZI
+  patches/cio_med    float32 (N, 32, 32)  — median-normed from raw CZI
+  images/raw         float32 (M, H, W)    — paxillin canvas (inlier-normed)
+  images/{ch}        float32 (M, H, W)    — other channels (inlier-normed)
+  images/meta        bytes (CSV)          — group, frame, condition_name, frame_idx
+  meta/csv           bytes (CSV)          — per-patch metadata
   attrs: pad_size, image_scale, dataset, n_patches, n_frames, channels (JSON)
 
 Usage:
     python scripts/pack_data_h5.py                     # all 4 datasets
     python scripts/pack_data_h5.py --datasets vinc pfak
-    python scripts/pack_data_h5.py --conditions control
+    python scripts/pack_data_h5.py --norm cio_rb
+    python scripts/pack_data_h5.py --raw-data-root /mnt/p/Annabel/FA-ML/...
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import h5py
@@ -59,38 +68,62 @@ DS_CHANNEL = {
 }
 ALL_DATASETS   = list(DS_CHANNEL.keys())
 ALL_CONDITIONS = ["control", "ycomp"]
-ALL_NORMS      = ["cio", "cio_rb"]
+ALL_NORMS      = ["cio", "cio_rb", "cio_inlier_med"]
 
-# Raw CZI folder per dataset/condition for robust re-normalization
-_FA = DATA_ROOT / "fa_data/other_paxillin"
+# CZI channel index for each biological channel (consistent across all 4 datasets)
+_CZI_CH = {'pax': 1, 'zyx': 2, 'act': 3, 'vinc': 0, 'ppax': 0, 'pfak': 0}
+
+# Rolling-ball radius: None for cio/cio_inlier_med, 20 for cio_rb
+_ROLLING_BALL = {"cio": None, "cio_rb": 20, "cio_inlier_med": None}
+
+# ── Raw CZI folder maps ───────────────────────────────────────────────────────
+
+_CLUSTER_FA = DATA_ROOT / "fa_data/other_paxillin"
 DS_RAW_FOLDERS: dict[str, dict[str, Path]] = {
     "vinc": {
-        "control": _FA / "20250311_eGFPZyxin488_Phalloidin405_Vinculin(rb)647_paxillin(m)568/Control",
-        "ycomp":   _FA / "20250311_eGFPZyxin488_Phalloidin405_Vinculin(rb)647_paxillin(m)568/Ycomp",
+        "control": _CLUSTER_FA / "20250311_eGFPZyxin488_Phalloidin405_Vinculin(rb)647_paxillin(m)568/Control",
+        "ycomp":   _CLUSTER_FA / "20250311_eGFPZyxin488_Phalloidin405_Vinculin(rb)647_paxillin(m)568/Ycomp",
     },
     "pfak": {
-        "control": _FA / "20250720_eGFP-Zyxin 488, Phalloidin 405, pFAK (rb) 647, paxillin(m)568/072025/Control",
-        "ycomp":   _FA / "20250720_eGFP-Zyxin 488, Phalloidin 405, pFAK (rb) 647, paxillin(m)568/072025/Ycomp",
+        "control": _CLUSTER_FA / "20250720_eGFP-Zyxin 488, Phalloidin 405, pFAK (rb) 647, paxillin(m)568/072025/Control",
+        "ycomp":   _CLUSTER_FA / "20250720_eGFP-Zyxin 488, Phalloidin 405, pFAK (rb) 647, paxillin(m)568/072025/Ycomp",
     },
     "ppax": {
-        "control": _FA / "20250721_eGFP-Zyxin 488_Phalloidin405_pPaxy118(rb) 647_Pax(m)568/Control",
-        "ycomp":   _FA / "20250721_eGFP-Zyxin 488_Phalloidin405_pPaxy118(rb) 647_Pax(m)568/Y-comp",
+        "control": _CLUSTER_FA / "20250721_eGFP-Zyxin 488_Phalloidin405_pPaxy118(rb) 647_Pax(m)568/Control",
+        "ycomp":   _CLUSTER_FA / "20250721_eGFP-Zyxin 488_Phalloidin405_pPaxy118(rb) 647_Pax(m)568/Y-comp",
     },
     "nih3t3": {
-        "control": _FA / "20260227_NIH3T3_ZyxinGFP,Phalloidin405,Vinc_rb647,Pax_m555_reduced_size_AH/Control",
-        "ycomp":   _FA / "20260227_NIH3T3_ZyxinGFP,Phalloidin405,Vinc_rb647,Pax_m555_reduced_size_AH/YCompound",
+        "control": _CLUSTER_FA / "20260227_NIH3T3_ZyxinGFP,Phalloidin405,Vinc_rb647,Pax_m555_reduced_size_AH/Control",
+        "ycomp":   _CLUSTER_FA / "20260227_NIH3T3_ZyxinGFP,Phalloidin405,Vinc_rb647,Pax_m555_reduced_size_AH/YCompound",
     },
 }
-# All datasets share the same patchprep segmentation parameters
+
+_LOCAL_FA = Path("/mnt/p/Annabel/FA-ML/For-Liya_Data-Sets-that-look-good-and-contain-paxillin")
+DS_RAW_FOLDERS_LOCAL: dict[str, dict[str, Path]] = {
+    "vinc": {
+        "control": _LOCAL_FA / "20250311_eGFPZyxin488_Phalloidin405_Vinculin(rb)647_paxillin(m)568/Control",
+        "ycomp":   _LOCAL_FA / "20250311_eGFPZyxin488_Phalloidin405_Vinculin(rb)647_paxillin(m)568/Ycomp",
+    },
+    "pfak": {
+        "control": _LOCAL_FA / "20250720_eGFP-Zyxin 488, Phalloidin 405, pFAK (rb) 647, paxillin(m)568/072025/Control",
+        "ycomp":   _LOCAL_FA / "20250720_eGFP-Zyxin 488, Phalloidin 405, pFAK (rb) 647, paxillin(m)568/072025/Ycomp",
+    },
+    "ppax": {
+        "control": _LOCAL_FA / "20250721_eGFP-Zyxin 488_Phalloidin405_pPaxy118(rb) 647_Pax(m)568/Control",
+        "ycomp":   _LOCAL_FA / "20250721_eGFP-Zyxin 488_Phalloidin405_pPaxy118(rb) 647_Pax(m)568/Y-comp",
+    },
+    "nih3t3": {
+        "control": _LOCAL_FA / "20260227_NIH3T3_ZyxinGFP,Phalloidin405,Vinc_rb647,Pax_m555_reduced_size_AH/Control",
+        "ycomp":   _LOCAL_FA / "20260227_NIH3T3_ZyxinGFP,Phalloidin405,Vinc_rb647,Pax_m555_reduced_size_AH/YCompound",
+    },
+}
+
 _SEG_PARAMS = dict(
     seg_ch=1, threshold=0.1, close_size=11,
     min_size_initial=3, min_size_post_close=10, min_size_final=30000,
 )
-# Rolling-ball radius: None for cio, 20 for cio_rb
-_ROLLING_BALL = {"cio": None, "cio_rb": 20}
 
 import re
-from collections import defaultdict
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import subcellae.dataprep.patch_prep as _pp
 
@@ -102,51 +135,82 @@ def _parse_patch(stem: str):
     return (m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5))) if m else None
 
 
-def _compute_robust_patches(
+def _resolve_raw_folders(raw_data_root: Path | None = None) -> dict[str, dict[str, Path]]:
+    """Return raw CZI folder map. Precedence: explicit root > local > cluster."""
+    if raw_data_root is not None:
+        # Build map from an explicit root containing the four experiment folders
+        # (same subfolder names as DS_RAW_FOLDERS_LOCAL)
+        local = {ds: {cond: raw_data_root / p.relative_to(_LOCAL_FA)
+                      for cond, p in conds.items()}
+                 for ds, conds in DS_RAW_FOLDERS_LOCAL.items()}
+        return local
+    # Auto-select: local NAS if mounted, else cluster
+    probe = next(iter(next(iter(DS_RAW_FOLDERS_LOCAL.values())).values()))
+    if probe.exists():
+        return DS_RAW_FOLDERS_LOCAL
+    return DS_RAW_FOLDERS
+
+
+def _normalize_from_raw_czis(
     records: list[dict],
     ds: str,
     conditions: list[str],
     norm: str,
-) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
-    """Re-normalize patches from raw CZI frames using trimmed-mean and median variants.
+    channels: list[str],
+    raw_folders: dict[str, dict[str, Path]],
+) -> tuple[np.ndarray | None, np.ndarray | None, dict | None]:
+    """Normalise patches and generate canvas images from raw CZI files.
 
-    Returns (patches_inlier, patches_med), each float32 (N, 32, 32), aligned with
-    *records* order. Returns (None, None) if raw folders are unavailable.
+    Applies cell-based normalisation (inlier-trimmed-mean and median variants)
+    so that patch and canvas pixel values are on the same scale.
+
+    Prints per-CZI outside-cell mean and median for QC.
+
+    Returns
+    -------
+    patches_inlier  : (N, 32, 32) float32, or None
+    patches_med     : (N, 32, 32) float32, or None
+    canvas_frames   : {(cond, frame_idx): {ch_key: (H, W) float32}}
+                      inlier-normalised full frame per channel, or None
     """
-    if ds not in DS_RAW_FOLDERS:
-        print(f"  [robust] no raw folder mapping for ds={ds!r}, skipping", flush=True)
-        return None, None
+    if ds not in raw_folders:
+        print(f"  [norm] no raw folder mapping for ds={ds!r}", flush=True)
+        return None, None, None
 
     rolling_ball_radius = _ROLLING_BALL.get(norm)
-    scale = 5.0  # matches patchprep default norm_cell_scale
+    scale = 5.0
 
-    # index records by (condition, frame_idx) → list of (record_pos, x_c, y_c, ps)
-    frame_map: dict[tuple[str, int], list[tuple[int, int, int, int]]] = defaultdict(list)
+    # Index records by (condition, frame_idx)
+    frame_map: dict[tuple, list[tuple]] = defaultdict(list)
     for i, rec in enumerate(records):
-        cond = rec["condition_name"]
-        fi   = rec["frame_idx"]
-        x_c  = rec["canvas_cx"] + PAD_SIZE
-        y_c  = rec["canvas_cy"] + PAD_SIZE
-        ps   = rec["ps"]
-        frame_map[(cond, fi)].append((i, x_c, y_c, ps))
+        x_c = rec["canvas_cx"] + PAD_SIZE
+        y_c = rec["canvas_cy"] + PAD_SIZE
+        frame_map[(rec["condition_name"], rec["frame_idx"])].append(
+            (i, x_c, y_c, rec["ps"])
+        )
 
-    patches_inlier = np.zeros((len(records), 32, 32), dtype=np.float32)
-    patches_med    = np.zeros((len(records), 32, 32), dtype=np.float32)
+    n = len(records)
+    patches_inlier = np.zeros((n, 32, 32), dtype=np.float32)
+    patches_med    = np.zeros((n, 32, 32), dtype=np.float32)
+    canvas_frames: dict[tuple, dict[str, np.ndarray]] = {}
+
+    ds_marker_ch = DS_CHANNEL.get(ds, "vinc")  # marker channel abbreviation
+    # All channels to extract from CZI (pax always first for normalisation)
+    all_chs = ['pax'] + [c for c in channels if c != 'pax']
 
     for cond in conditions:
-        raw_folder = DS_RAW_FOLDERS[ds].get(cond)
+        raw_folder = raw_folders.get(ds, {}).get(cond)
         if raw_folder is None or not raw_folder.exists():
-            print(f"  [robust] raw folder missing for {ds}/{cond}: {raw_folder}", flush=True)
+            print(f"  [norm] raw folder missing for {ds}/{cond}: {raw_folder}", flush=True)
             continue
 
         filenames = _pp.list_image_files(str(raw_folder), file_type="czi")
         if not filenames:
-            print(f"  [robust] no CZI files in {raw_folder}", flush=True)
+            print(f"  [norm] no CZI files in {raw_folder}", flush=True)
             continue
 
-        # collect unique frame indices for this condition
         cond_frame_idxs = sorted({fi for (c, fi) in frame_map if c == cond})
-        print(f"  [robust] {ds}/{cond}: re-normalising {len(cond_frame_idxs)} frames …", flush=True)
+        print(f"  [norm] {ds}/{cond}: normalising {len(cond_frame_idxs)} frames …", flush=True)
 
         for fi in cond_frame_idxs:
             if fi >= len(filenames):
@@ -156,11 +220,11 @@ def _compute_robust_patches(
             filename = filenames[fi]
             raw = _pp._load_raw_squeezed(str(raw_folder), filename, "czi")
 
-            # rolling ball on pax channel (ch1) before segmentation
-            img = _pp._extract_channel(raw, 1, filename, "czi")
+            # ── paxillin: rolling ball → segment → normalise ──────────────────
+            pax_raw = _pp._extract_channel(raw, _CZI_CH['pax'], filename, "czi")
             if rolling_ball_radius is not None:
                 _s = 255.0 * 255.0
-                img = _pp.apply_rolling_ball(img * _s, radius=rolling_ball_radius) / _s
+                pax_raw = _pp.apply_rolling_ball(pax_raw * _s, radius=rolling_ball_radius) / _s
 
             seg_input = _pp._extract_channel(raw, _SEG_PARAMS["seg_ch"], filename, "czi")
             seg = _pp.segment_cell_mask(
@@ -172,62 +236,61 @@ def _compute_robust_patches(
                 min_size_final=_SEG_PARAMS["min_size_final"],
             ).astype(float)
 
-            img_inlier = _pp.normalize_cell_insideoutside_inlier(img, seg, scale=scale)
-            img_med    = _pp.normalize_cell_insideoutside_med(img, seg, scale=scale)
+            outside_mask = (1 - seg).astype(bool)
+            outside_vals = pax_raw[outside_mask]
+            out_mean   = float(np.mean(outside_vals))   if outside_vals.size else float('nan')
+            out_median = float(np.median(outside_vals)) if outside_vals.size else float('nan')
+            print(f"    {filename}: outside-cell pax  mean={out_mean:.5f}  median={out_median:.5f}",
+                  flush=True)
 
-            img_inlier_pad = _pp.image_padding(img_inlier, PAD_SIZE, float(np.mean(img_inlier)))
-            img_med_pad    = _pp.image_padding(img_med,    PAD_SIZE, float(np.mean(img_med)))
+            pax_inlier = _pp.normalize_cell_insideoutside_inlier(pax_raw, seg, scale=scale)
+            pax_med    = _pp.normalize_cell_insideoutside_med(pax_raw,    seg, scale=scale)
 
+            pax_inlier_pad = _pp.image_padding(pax_inlier, PAD_SIZE, float(np.mean(pax_inlier)))
+            pax_med_pad    = _pp.image_padding(pax_med,    PAD_SIZE, float(np.mean(pax_med)))
+
+            # ── other channels: normalise with same seg mask (inlier variant) ─
+            ch_canvas: dict[str, np.ndarray] = {'pax': pax_inlier}
+            for ch_key in all_chs:
+                if ch_key == 'pax':
+                    continue
+                czi_idx = _CZI_CH.get(ch_key)
+                if czi_idx is None or czi_idx >= raw.shape[0]:
+                    continue
+                ch_raw = _pp._extract_channel(raw, czi_idx, filename, "czi").astype(np.float32)
+                ch_norm = _pp.normalize_cell_insideoutside_inlier(ch_raw, seg, scale=scale)
+                ch_canvas[ch_key] = ch_norm
+
+            canvas_frames[(cond, fi)] = ch_canvas
+
+            # ── extract patches from padded frames ────────────────────────────
             for (rec_i, x_c, y_c, ps) in frame_map[(cond, fi)]:
                 half = ps // 2
                 r0, r1 = y_c - half, y_c + half
                 c0, c1 = x_c - half, x_c + half
-                patches_inlier[rec_i] = img_inlier_pad[r0:r1, c0:c1].astype(np.float32)
-                patches_med[rec_i]    = img_med_pad[r0:r1, c0:c1].astype(np.float32)
+                patches_inlier[rec_i] = pax_inlier_pad[r0:r1, c0:c1].astype(np.float32)
+                patches_med[rec_i]    = pax_med_pad[r0:r1, c0:c1].astype(np.float32)
 
-    return patches_inlier, patches_med
+    if not canvas_frames:
+        return None, None, None
 
-
-def _load_frames(frame_dir: Path, cond: str, frame_indices: list[int],
-                 channels: list[str]) -> dict[str, np.ndarray]:
-    """Load selected source frames per channel → {ch: (M, H, W) float32}."""
-    buf: dict[str, list] = {ch: [] for ch in channels}
-    for fi in frame_indices:
-        for ch in channels:
-            p = frame_dir / f"{cond}_f{fi:04d}_{ch}.tif"
-            buf[ch].append(tifffile.imread(str(p)).astype(np.float32) if p.exists() else None)
-
-    result: dict[str, np.ndarray] = {}
-    for ch in channels:
-        frames = buf[ch]
-        valid  = [f for f in frames if f is not None]
-        if not valid:
-            print(f"    WARNING: no '{ch}' frames found", flush=True)
-            continue
-        h, w   = valid[0].shape[-2], valid[0].shape[-1]
-        stack  = np.zeros((len(frames), h, w), dtype=np.float32)
-        for i, f in enumerate(frames):
-            if f is not None:
-                stack[i] = f if f.ndim == 2 else f[0]
-        result[ch] = stack
-    return result
+    return patches_inlier, patches_med, canvas_frames
 
 
 def pack_dataset(ds: str, conditions: list[str], norm: str = "cio",
                  patches_root: Path | None = None,
-                 frames_root:  Path | None = None) -> Path | None:
+                 raw_data_root: Path | None = None) -> Path | None:
     if patches_root is None:
         patches_root = DATA_ROOT / f"ae_results/patches/{norm}"
-    if frames_root is None:
-        frames_root = DATA_ROOT / f"ae_results/source_frames/{norm}"
     out_dir  = patches_root / ds
     out_path = out_dir / "data.h5"
 
-    all_records:  list[dict]      = []
+    all_records:  list[dict]       = []
     all_patches:  list[np.ndarray] = []
-    frame_arrays: dict[str, list[np.ndarray]] = {}  # ch → list of (H,W) arrays
-    img_meta_rows: list[dict]     = []
-    global_frame_idx = 0  # row counter in images/raw across all conditions
+    img_meta_rows: list[dict]      = []
+    # frame_arrays: {ch_key: [(H,W) float32, ...]}  — one entry per canvas frame
+    frame_arrays: dict[str, list[np.ndarray]] = {}
+    global_frame_idx = 0
 
     ds_ch    = DS_CHANNEL[ds]
     channels = (["pax", ds_ch, "zyx", "act"] if ds_ch not in ("pax", "zyx", "act")
@@ -237,7 +300,6 @@ def pack_dataset(ds: str, conditions: list[str], norm: str = "cio",
 
     for cond in conditions:
         patch_dir = patches_root / ds / cond / PATCH_SUBDIR
-        frame_dir = frames_root  / ds / cond
 
         if not patch_dir.exists():
             print(f"  SKIP {ds}/{cond}: {patch_dir} not found", flush=True)
@@ -270,40 +332,17 @@ def pack_dataset(ds: str, conditions: list[str], norm: str = "cio",
                 "annotation_label_name": "",
             })
 
-        meta_df     = pd.DataFrame(records)
-        frame_idxs  = sorted(meta_df["frame_idx"].unique().tolist())
-        fi_to_row   = {fi: global_frame_idx + i for i, fi in enumerate(frame_idxs)}
-
-        # update group row references
-        meta_df["frame_row"] = meta_df["frame_idx"].map(fi_to_row)
+        meta_df    = pd.DataFrame(records)
+        frame_idxs = sorted(meta_df["frame_idx"].unique().tolist())
+        fi_to_row  = {fi: global_frame_idx + i for i, fi in enumerate(frame_idxs)}
 
         all_records.extend(records)
 
-        # patches
         patches = np.stack([tifffile.imread(str(t)).astype(np.float32) for t in tifs])
         all_patches.append(patches)
-        print(f"    patches: {patches.shape}", flush=True)
+        print(f"    patches/raw: {patches.shape}", flush=True)
 
-        # source frames
-        if frame_dir.exists():
-            fa = _load_frames(frame_dir, cond, frame_idxs, channels)
-            for ch in channels:
-                if ch in fa:
-                    for row in fa[ch]:
-                        frame_arrays[ch].append(row)
-                else:
-                    # pad with zeros so all channels stay aligned
-                    ref_ch = next((c for c in channels if c in fa), None)
-                    if ref_ch:
-                        h, w = fa[ref_ch][0].shape
-                        for _ in frame_idxs:
-                            frame_arrays[ch].append(np.zeros((h, w), dtype=np.float32))
-            for ch, arr in fa.items():
-                print(f"    {ch} frames: {arr.shape}", flush=True)
-        else:
-            print(f"    WARNING: frame dir missing {frame_dir}", flush=True)
-
-        # image meta rows
+        # image meta rows (frame indices updated after canvas is known)
         for fi in frame_idxs:
             img_meta_rows.append({
                 "group":          f"{cond}_f{fi:04d}",
@@ -318,20 +357,42 @@ def pack_dataset(ds: str, conditions: list[str], norm: str = "cio",
         print(f"  SKIP {ds}: no data found", flush=True)
         return None
 
-    meta_df    = pd.DataFrame(all_records)
-    img_meta   = pd.DataFrame(img_meta_rows)
+    meta_df   = pd.DataFrame(all_records)
+    img_meta  = pd.DataFrame(img_meta_rows)
     patches_all = np.concatenate(all_patches, axis=0)
     print(f"\n  {ds}: total patches={len(patches_all)}, frames={global_frame_idx}", flush=True)
 
-    # Robust normalization variants from raw frames
-    patches_inlier, patches_med = _compute_robust_patches(
-        all_records, ds, conditions, norm
+    # ── Normalise from raw CZI → patches/cio_inlier, patches/cio_med, images/* ─
+    raw_folders = _resolve_raw_folders(raw_data_root)
+    patches_inlier, patches_med, canvas_frames = _normalize_from_raw_czis(
+        all_records, ds, conditions, norm, channels, raw_folders
     )
 
+    # Build frame_arrays in the same order as img_meta_rows
+    if canvas_frames is not None:
+        for row in img_meta_rows:
+            cond = row["condition_name"]
+            fi   = row["frame_idx"]
+            ch_canvas = canvas_frames.get((cond, fi), {})
+            for ch in channels:
+                arr = ch_canvas.get(ch)
+                if arr is not None:
+                    frame_arrays[ch].append(arr.astype(np.float32))
+                else:
+                    # fall back to zeros if this channel wasn't in the CZI
+                    h, w = next((a.shape for a in
+                                 sum(frame_arrays.values(), []) if a is not None), (1024, 1024))
+                    frame_arrays[ch].append(np.zeros((h, w), dtype=np.float32))
+                    print(f"    WARNING: {ch} missing for {cond}_f{fi:04d}, using zeros", flush=True)
+    else:
+        print(f"  WARNING: canvas images not available — images/* will be empty", flush=True)
+
+    # ── Write HDF5 ─────────────────────────────────────────────────────────────
     out_dir.mkdir(parents=True, exist_ok=True)
     with h5py.File(str(out_path), "w") as f:
         f.create_dataset("patches/raw", data=patches_all,
                          compression="gzip", compression_opts=4)
+        print(f"  patches/raw saved: {patches_all.shape}", flush=True)
 
         if patches_inlier is not None:
             f.create_dataset("patches/cio_inlier", data=patches_inlier,
@@ -340,16 +401,18 @@ def pack_dataset(ds: str, conditions: list[str], norm: str = "cio",
                              compression="gzip", compression_opts=4)
             print(f"  patches/cio_inlier and patches/cio_med saved", flush=True)
 
-        if "pax" in frame_arrays and frame_arrays["pax"]:
+        if frame_arrays.get("pax"):
             stack = np.stack(frame_arrays["pax"])
             f.create_dataset("images/raw", data=stack,
                              compression="gzip", compression_opts=4)
+            print(f"  images/raw (pax, inlier-normed): {stack.shape}", flush=True)
 
         for ch in channels:
             if ch != "pax" and frame_arrays.get(ch):
                 stack = np.stack(frame_arrays[ch])
                 f.create_dataset(f"images/{ch}", data=stack,
                                  compression="gzip", compression_opts=4)
+                print(f"  images/{ch}: {stack.shape}", flush=True)
 
         f.create_dataset("meta/csv",    data=np.bytes_(meta_df.to_csv(index=False)))
         f.create_dataset("images/meta", data=np.bytes_(img_meta.to_csv(index=False)))
@@ -388,23 +451,25 @@ def main():
                     choices=ALL_DATASETS, metavar="DS")
     ap.add_argument("--conditions", nargs="+", default=ALL_CONDITIONS,
                     choices=ALL_CONDITIONS, metavar="COND")
-    ap.add_argument("--norm", default="cio", choices=ALL_NORMS,
-                    help="Normalisation variant to pack (default: cio)")
+    ap.add_argument("--norm", default="cio_inlier_med", choices=ALL_NORMS,
+                    help="Normalisation variant (default: cio_inlier_med)")
     ap.add_argument("--patches-root", default=None, metavar="PATH",
                     help="Override patches root dir (default: DATA_ROOT/ae_results/patches/{norm})")
-    ap.add_argument("--frames-root", default=None, metavar="PATH",
-                    help="Override frames root dir (default: DATA_ROOT/ae_results/source_frames/{norm})")
+    ap.add_argument("--raw-data-root", default=None, metavar="PATH",
+                    help="Root folder containing the raw CZI experiment subfolders "
+                         "(auto-detected if omitted)")
     args = ap.parse_args()
 
-    pr = Path(args.patches_root) if args.patches_root else None
-    fr = Path(args.frames_root)  if args.frames_root  else None
+    pr = Path(args.patches_root)  if args.patches_root  else None
+    rdr = Path(args.raw_data_root) if args.raw_data_root else None
 
     print(f"Packing data.h5 [{args.norm}] for {args.datasets} × {args.conditions}\n", flush=True)
-    if pr: print(f"  patches-root: {pr}")
-    if fr: print(f"  frames-root : {fr}")
+    if pr:  print(f"  patches-root : {pr}")
+    if rdr: print(f"  raw-data-root: {rdr}")
     for ds in args.datasets:
         print(f"=== {ds} ===", flush=True)
-        pack_dataset(ds, args.conditions, norm=args.norm, patches_root=pr, frames_root=fr)
+        pack_dataset(ds, args.conditions, norm=args.norm,
+                     patches_root=pr, raw_data_root=rdr)
 
     print("\nAll done.", flush=True)
 
