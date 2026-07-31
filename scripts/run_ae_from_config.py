@@ -67,11 +67,14 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
     for entry in raw_patch_dirs:
         if "channel_dirs" in entry:
             # Multi-channel mode: list of per-channel directories
-            patch_dirs.append({
+            d = {
                 "channel_dirs":  [str(d) for d in entry["channel_dirs"]],
                 "condition":     int(entry.get("condition", 0)),
                 "condition_name": str(entry.get("condition_name", "")),
-            })
+            }
+            if "frame_dir" in entry:
+                d["frame_dir"] = str(entry["frame_dir"])
+            patch_dirs.append(d)
         else:
             # Single-channel mode (original behaviour)
             d = {
@@ -162,13 +165,16 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
 
     # ---- enlarged crop ----
     enlarged_crop              = bool(_get("enlarged_crop",  "enabled",        False))
-    enlarged_crop_channel      = str(_get("enlarged_crop",   "channel",        "pax"))
+    _ch_raw = _get("enlarged_crop", "channel", "pax")
+    enlarged_crop_channel = _ch_raw if isinstance(_ch_raw, list) else str(_ch_raw)
     enlarged_crop_context_size = int(_get("enlarged_crop",   "context_size",   58))
     enlarged_crop_max_shift    = int(_get("enlarged_crop",   "max_shift_px",   4))
     enlarged_crop_max_angle    = float(_get("enlarged_crop", "max_angle_deg",  15.0))
     enlarged_crop_pad_size     = int(_get("enlarged_crop",   "pad_size",       64))
-    enlarged_crop_input_divisor = float(_get("enlarged_crop", "input_divisor", 1.0))
-    patch_input_divisor         = float(_get("training",      "patch_input_divisor", 1.0))
+    enlarged_crop_input_divisor  = float(_get("enlarged_crop", "input_divisor",  1.0))
+    _clip_raw = _get("enlarged_crop", "input_clip_max", None)
+    enlarged_crop_input_clip_max = float(_clip_raw) if _clip_raw is not None else None
+    patch_input_divisor          = float(_get("training",      "patch_input_divisor", 1.0))
 
     output_sigmoid             = bool(_get("model",          "output_sigmoid",   True))
     recon_loss_type            = str(_get("model",           "recon_loss_type",  "mse"))
@@ -251,6 +257,7 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
         enlarged_crop_max_angle=enlarged_crop_max_angle,
         enlarged_crop_pad_size=enlarged_crop_pad_size,
         enlarged_crop_input_divisor=enlarged_crop_input_divisor,
+        enlarged_crop_input_clip_max=enlarged_crop_input_clip_max,
         patch_input_divisor=patch_input_divisor,
         output_sigmoid=output_sigmoid,
         recon_loss_type=recon_loss_type,

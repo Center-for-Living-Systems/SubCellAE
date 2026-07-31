@@ -595,6 +595,7 @@ class EnlargedCropDataset(Dataset):
         patch_size: int = 32,
         pad_size: int = 64,
         input_divisor: float = 1.0,
+        input_clip_max: float | None = None,
         annotation_file: str | None = None,
         label_col: str = "Classification",
         filename_col: str = "crop_img_filename",
@@ -608,6 +609,7 @@ class EnlargedCropDataset(Dataset):
         self.condition_name = condition_name or str(condition)
         self.context_size   = context_size + (context_size % 2)  # ensure even
         self._input_divisor = float(input_divisor)
+        self._input_clip_max = float(input_clip_max) if input_clip_max is not None else None
 
         # ── annotation loader ────────────────────────────────────────────
         def _load_annotations(ann_file, col, fname_col, order):
@@ -712,6 +714,8 @@ class EnlargedCropDataset(Dataset):
         cy_p = cy0 + self._pad_px
 
         region = frame_p[cy_p - h2 : cy_p + h2, cx_p - h2 : cx_p + h2]
+        if self._input_clip_max is not None:
+            region = np.clip(region, 0.0, self._input_clip_max)
         if self._input_divisor != 1.0:
             region = region / self._input_divisor
         image  = torch.tensor(region[np.newaxis], dtype=torch.float32)
@@ -760,6 +764,7 @@ class MultiChannelEnlargedCropDataset(Dataset):
         patch_size: int = 32,
         pad_size: int = 64,
         input_divisor: float = 1.0,
+        input_clip_max: float | None = None,
         annotation_file: str | None = None,
         label_col: str = "Classification",
         filename_col: str = "crop_img_filename",
@@ -778,6 +783,7 @@ class MultiChannelEnlargedCropDataset(Dataset):
         self.condition_name = condition_name or str(condition)
         self.context_size   = context_size + (context_size % 2)
         self._input_divisor = float(input_divisor)
+        self._input_clip_max = float(input_clip_max) if input_clip_max is not None else None
         self._n_channels    = len(channels)
 
         # ── annotation loader (same as EnlargedCropDataset) ──────────────
@@ -869,6 +875,8 @@ class MultiChannelEnlargedCropDataset(Dataset):
         planes = []
         for ch_frames in self._frames_per_ch:
             region = ch_frames[fkey][cy_p - h2 : cy_p + h2, cx_p - h2 : cx_p + h2]
+            if self._input_clip_max is not None:
+                region = np.clip(region, 0.0, self._input_clip_max)
             if self._input_divisor != 1.0:
                 region = region / self._input_divisor
             planes.append(region)

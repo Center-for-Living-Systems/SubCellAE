@@ -251,12 +251,13 @@ class AEConfig:
     # context_size formula: 2 * ceil(sqrt(2) * (input_ps/2 + max_shift_px))
     # For input_ps=32, max_shift=4: context_size=58.
     enlarged_crop: bool              = False
-    enlarged_crop_channel: str       = "pax"
+    enlarged_crop_channel: "str | list" = "pax"
     enlarged_crop_context_size: int  = 58
     enlarged_crop_max_shift: int     = 4
     enlarged_crop_max_angle: float   = 15.0
     enlarged_crop_pad_size: int      = 64
     enlarged_crop_input_divisor: float = 1.0
+    enlarged_crop_input_clip_max: float | None = None
 
     output_sigmoid: bool             = True
     recon_loss_type: str             = "mse"   # "mse", "l1", "nmse", "nl1"
@@ -994,6 +995,7 @@ def run_ae_pipeline(cfg: AEConfig):
                 patch_size=cfg.input_ps,
                 pad_size=cfg.enlarged_crop_pad_size,
                 input_divisor=cfg.enlarged_crop_input_divisor,
+                input_clip_max=cfg.enlarged_crop_input_clip_max,
                 **shared_ann_kwargs,
             )
         elif "channel_dirs" in entry:
@@ -1031,6 +1033,7 @@ def run_ae_pipeline(cfg: AEConfig):
                 patch_size=cfg.input_ps,
                 pad_size=cfg.enlarged_crop_pad_size,
                 input_divisor=cfg.enlarged_crop_input_divisor,
+                input_clip_max=cfg.enlarged_crop_input_clip_max,
                 **shared_ann_kwargs,
             )
         else:
