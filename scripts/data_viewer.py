@@ -72,52 +72,89 @@ def _read_h5(path: str):
 
     Returns
     -------
-    df, patch_arrays, images_raw, img_meta,
-    images_allch, channel_names, pad_size, image_scale
-      patch_arrays : {key: (N, H, W) float32}  — all available patch normalizations
-                     e.g. {'raw': ..., 'cio_inlier': ..., 'cio_med': ...}
-      images_allch : {group_key: (C, H, W) float32}  — all channels per frame
-      channel_names: ['paxillin', 'vinculin', 'zyxin', ...]
+    df, patch_arrays, patch_norms, images_raw, img_meta,
+    channel_names, ch_keys, pad_size, image_scale, canvas_norms
+
+      patch_arrays : {key: (N,H,W)} — flat (includes 'raw', backward-compat cio_* pax)
+      patch_norms  : {norm: {ch: (N,H,W)}} — new nested per-norm per-channel patches
+      canvas_norms : {norm: {ch: (M,H,W)}} — per-norm per-channel canvas images
+      ch_keys      : ['pax', 'vinc'/'pfak'/'ppax', 'zyx', 'act']
     """
+    import json as _json
     with h5py.File(path, 'r') as f:
-        df          = pd.read_csv(io.StringIO(f['meta/csv'][()].decode()))
-        # Load all available patch normalisations
+        df = pd.read_csv(io.StringIO(f['meta/csv'][()].decode()))
+
+        # ── Patches ──────────────────────────────────────────────────────────
         patch_arrays: dict[str, np.ndarray] = {}
+        patch_norms:  dict[str, dict[str, np.ndarray]] = {}
+
+        if 'patches/raw' in f:
+            patch_arrays['raw'] = f['patches/raw'][()]
+
         if 'patches' in f:
             for key in f['patches'].keys():
-                patch_arrays[key] = f[f'patches/{key}'][()]
-        patches_raw = patch_arrays.get('raw')
-        images_raw  = f['images/raw'][()]  if 'images/raw'  in f else None
-        img_meta    = (pd.read_csv(io.StringIO(f['images/meta'][()].decode()))
-                       if 'images/meta' in f else None)
+                item = f[f'patches/{key}']
+                if isinstance(item, h5py.Dataset):
+                    # old flat structure — keep for backward compat
+                    patch_arrays[key] = item[()]
+                    if key != 'raw':
+                        patch_norms.setdefault(key, {})['pax'] = item[()]
+                elif isinstance(item, h5py.Group):
+                    patch_norms[key] = {ch: item[ch][()] for ch in item.keys()}
+                    if 'pax' in patch_norms[key] and key not in patch_arrays:
+                        patch_arrays[key] = patch_norms[key]['pax']
+
+        # ── Canvas images ─────────────────────────────────────────────────────
+        canvas_norms: dict[str, dict[str, np.ndarray]] = {}
+        images_raw = f['images/raw'][()] if 'images/raw' in f else None
+
+        if 'images' in f:
+            for key in f['images'].keys():
+                if key in ('raw', 'meta', 'raw_med', 'raw_mode', 'raw_mode_prt'):
+                    continue
+                item = f[f'images/{key}']
+                if isinstance(item, h5py.Group):
+                    canvas_norms[key] = {ch: item[ch][()] for ch in item.keys()}
+
+        # Old flat fallbacks → inject into canvas_norms
+        _old_map = {
+            'raw_med':      'cio_med',
+            'raw_mode':     'cio_mode',
+            'raw_mode_prt': 'cio_mode_prt',
+        }
+        for old_k, norm_k in _old_map.items():
+            if f'images/{old_k}' in f and norm_k not in canvas_norms:
+                canvas_norms.setdefault(norm_k, {})['pax'] = f[f'images/{old_k}'][()]
+        if images_raw is not None and 'cio_inlier' not in canvas_norms:
+            canvas_norms.setdefault('cio_inlier', {})['pax'] = images_raw
+
+        # images_raw fallback
+        if images_raw is None:
+            images_raw = canvas_norms.get('cio_inlier', {}).get('pax')
+        if images_raw is None:
+            images_raw = next((v.get('pax') for v in canvas_norms.values() if 'pax' in v), None)
+
+        img_meta = (pd.read_csv(io.StringIO(f['images/meta'][()].decode()))
+                    if 'images/meta' in f else None)
         pad_size    = float(f.attrs.get('pad_size', 64))
         image_scale = float(f.attrs.get('image_scale', 1.0))
 
-        # Extra channel arrays (e.g. vinc, zyx, act)
-        _abbrs = list(f.attrs.get('channels', []))
-        _extra = [a for a in _abbrs if a != 'pax' and f'images/{a}' in f]
-        if not _extra:
-            _extra = sorted(k for k in f.get('images', {}).keys()
-                            if k not in ('raw', 'meta'))
-        _extra_arrs = {k: f[f'images/{k}'][()] for k in _extra}
-        ch_keys = ['pax'] + list(_extra)
-        channel_names = ['paxillin'] + [_CH_ABBR.get(a, a) for a in _extra]
+        # Channel list — from attrs or inferred from canvas/patch groups
+        try:
+            ch_keys_raw: list[str] = _json.loads(f.attrs['channels'])
+        except Exception:
+            ch_keys_raw = []
+        if not ch_keys_raw:
+            for v in canvas_norms.values():
+                ch_keys_raw = list(v.keys()); break
+        if not ch_keys_raw:
+            ch_keys_raw = ['pax']
 
-        # Build per-group multi-channel stack
-        images_allch: dict[str, np.ndarray] = {}
-        if img_meta is not None and images_raw is not None:
-            for _, row in img_meta.iterrows():
-                fi  = int(row['frame'])
-                grp = _NORM_FKEY.sub(r'_f\1', str(row['group']))
-                chs = [images_raw[fi].astype(np.float32)]
-                for k in _extra:
-                    arr = _extra_arrs[k]
-                    chs.append(arr[fi].astype(np.float32) if fi < len(arr)
-                               else np.zeros_like(chs[0]))
-                images_allch[grp] = np.stack(chs)   # (C, H, W)
+    ch_keys = ch_keys_raw
+    channel_names = [_CH_ABBR.get(k, k) for k in ch_keys]
 
-    return (df, patch_arrays, images_raw, img_meta,
-            images_allch, channel_names, ch_keys, pad_size, image_scale)
+    return (df, patch_arrays, patch_norms, images_raw, img_meta,
+            channel_names, ch_keys, pad_size, image_scale, canvas_norms)
 
 
 # ── Display helpers ───────────────────────────────────────────────────────────
@@ -228,17 +265,29 @@ def _rect_color(v: float, show_green: bool, show_magenta: bool, show_red: bool
 
 def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
     print(f'[data_viewer] Loading {data_h5} …', flush=True)
-    (df, patch_arrays, images_raw, img_meta,
-     images_allch, channel_names, ch_keys, pad_size, image_scale) = _read_h5(data_h5)
+    (df, patch_arrays, patch_norms, images_raw, img_meta,
+     channel_names, ch_keys, pad_size, image_scale,
+     canvas_norms) = _read_h5(data_h5)
     n = len(df)
     patches_raw = patch_arrays.get('raw')
 
-    # Pre-compute per-normalization maxes for grid colouring
-    _patch_maxes_cache: dict[str, np.ndarray | None] = {
-        k: v.max(axis=(1, 2)) for k, v in patch_arrays.items()
-    }
-    _active_norm: list[str] = ['raw']   # mutable single-element list (closure trick)
-    patch_maxes = _patch_maxes_cache.get('raw')
+    # _patch_maxes_cache: norm → pax patch maxes (for grid colouring)
+    _patch_maxes_cache: dict[str, np.ndarray | None] = {}
+    for k, v in patch_arrays.items():
+        _patch_maxes_cache[k] = v.max(axis=(1, 2))
+    for nk, ch_dict in patch_norms.items():
+        if nk not in _patch_maxes_cache and 'pax' in ch_dict:
+            _patch_maxes_cache[nk] = ch_dict['pax'].max(axis=(1, 2))
+
+    _avail_norms = list(dict.fromkeys(
+        list(canvas_norms.keys()) + list(patch_norms.keys())
+    ))
+    _default_norm = ('cio_inlier' if 'cio_inlier' in _avail_norms
+                     else (_avail_norms[0] if _avail_norms else 'raw'))
+    _active_norm: list[str] = [_default_norm]
+    patch_maxes = _patch_maxes_cache.get(_default_norm)
+    if patch_maxes is None:
+        patch_maxes = _patch_maxes_cache.get('raw')
 
     ds_name  = Path(data_h5).parent.name
     n_ch     = len(channel_names)          # total channels (pax + extras)
@@ -257,7 +306,9 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
     conds    = df[cond_col].fillna('').unique() if cond_col in df.columns else []
 
     def _make_hist_pane(norm_key: str) -> pn.pane.PNG:
-        arr = patch_arrays.get(norm_key)
+        arr = patch_norms.get(norm_key, {}).get('pax')
+        if arr is None:
+            arr = patch_arrays.get(norm_key)
         px_vals = arr.flatten().astype(np.float32) if arr is not None else np.zeros(0, np.float32)
         fig_h, ax = plt.subplots(figsize=(3.0, 3.0))
         ax.hist(px_vals, bins=200, color='#888888', alpha=0.75, density=True)
@@ -276,8 +327,9 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
         return _fig_to_pane(fig_h, dpi=100)
 
     # Pre-render histograms for each available normalization
-    _hist_panes: dict[str, pn.pane.PNG] = {k: _make_hist_pane(k) for k in patch_arrays}
-    hist_col = pn.Column(_hist_panes.get('raw', pn.pane.Markdown('')), width=320)
+    _hist_norms = list(dict.fromkeys(list(patch_norms.keys()) + list(patch_arrays.keys())))
+    _hist_panes: dict[str, pn.pane.PNG] = {k: _make_hist_pane(k) for k in _hist_norms}
+    hist_col = pn.Column(_hist_panes.get(_default_norm, pn.pane.Markdown('')), width=320)
 
     _ch_id_str = '-'.join(ch_canvas_labels)
     dataset_info_html = pn.pane.HTML(
@@ -311,19 +363,26 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
         return pn.Row(left_col, pn.pane.Markdown('*No image groups found.*'))
 
     # ── Canvas helpers ────────────────────────────────────────────────────────
-    def _get_pax_canvas(group_key: str) -> np.ndarray:
+    def _get_canvas(group_key: str, ch: str = 'pax') -> np.ndarray:
         matches = img_meta[img_meta['group'].astype(str) == group_key]
-        if matches.empty:
-            return np.zeros((images_raw.shape[1], images_raw.shape[2]), dtype=np.float32)
-        arr = images_raw[int(matches.iloc[0]['frame'])].astype(np.float32)
+        norm = _active_norm[0]
+        ch_map = canvas_norms.get(norm)
+        if not ch_map:
+            ch_map = canvas_norms.get('cio_inlier') or {}
+        arr_stack = ch_map.get(ch)
+        if arr_stack is None:
+            arr_stack = ch_map.get('pax')
+        if arr_stack is None and images_raw is not None and ch == 'pax':
+            arr_stack = images_raw
+        if matches.empty or arr_stack is None:
+            h = images_raw.shape[1] if images_raw is not None else 1024
+            w = images_raw.shape[2] if images_raw is not None else 1024
+            return np.zeros((h, w), dtype=np.float32)
+        arr = arr_stack[int(matches.iloc[0]['frame'])].astype(np.float32)
         return arr if arr.ndim == 2 else arr[0]
 
-    def _get_allch(group_key: str) -> np.ndarray | None:
-        """Return (C, H, W) float32 for group_key, or None."""
-        return images_allch.get(_norm_grp(group_key))
-
     init_group = unique_groups[0]
-    init_arr   = _get_pax_canvas(init_group)
+    init_arr   = _get_canvas(init_group, 'pax')
     H, W       = init_arr.shape
     _aspect    = H / W if W > 0 else 1.0
     _pax_w, _pax_h   = 520, int(520 * _aspect)
@@ -374,14 +433,15 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
     pax_fig.yaxis.axis_label = 'row (px)'
 
     # ── Side-channel canvases (linked ranges, grid only, no intensity overlay) ─
-    side_ch_indices = list(range(1, n_ch))   # all channels except paxillin (index 0)
+    side_ch_keys    = ch_keys[1:]          # all channels except paxillin
+    side_ch_indices = list(range(1, n_ch)) # for backward compat references
     side_srcs: list[ColumnDataSource] = []
     side_figs: list = []
     side_mappers: list[LinearColorMapper] = []
     _blank_canvas = np.zeros((H, W), dtype=np.float32)
 
-    for ci in side_ch_indices:
-        ch_name = ch_canvas_labels[ci] if ci < len(ch_canvas_labels) else f'ch{ci}'
+    for ci, ch_key in enumerate(side_ch_keys, start=1):
+        ch_name = ch_canvas_labels[ci] if ci < len(ch_canvas_labels) else ch_key
         _src = ColumnDataSource(dict(image=[_flip(_blank_canvas)],
                                      x=[0], y=[0], dw=[W], dh=[H]))
         _fig = figure(
@@ -404,16 +464,11 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
         side_figs.append(_fig)
 
     def _update_side_canvases(group_key: str):
-        allch = _get_allch(group_key)
-        for i, (csrc, ci) in enumerate(zip(side_srcs, side_ch_indices)):
-            if allch is not None and ci < allch.shape[0]:
-                cimg = _display_norm(allch[ci])
-                csrc.data = dict(image=[_flip(cimg)],
-                                 x=[0], y=[0],
-                                 dw=[cimg.shape[1]], dh=[cimg.shape[0]])
-            else:
-                csrc.data = dict(image=[_flip(_blank_canvas)],
-                                 x=[0], y=[0], dw=[W], dh=[H])
+        for csrc, ch_key in zip(side_srcs, side_ch_keys):
+            cimg = _get_canvas(group_key, ch_key).astype(np.float32)
+            csrc.data = dict(image=[_flip(cimg)],
+                             x=[0], y=[0],
+                             dw=[cimg.shape[1]], dh=[cimg.shape[0]])
 
     # ── Rect helpers ──────────────────────────────────────────────────────────
     def _build_rects_base(group_key: str, img_H: int) -> list:
@@ -452,7 +507,7 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
             overlay_src.data = dict(image=[np.zeros((Hc, Wc), dtype=np.uint32)],
                                     x=[0], y=[0], dw=[Wc], dh=[Hc])
             return
-        arr  = _get_pax_canvas(_state['group'])
+        arr  = _get_canvas(_state['group'], 'pax')
         H2, W2 = arr.shape
         mask = np.zeros((H2, W2), dtype=bool)
         for _, row in df[df[pg_col].astype(str) == _state['group']].iterrows():
@@ -469,7 +524,7 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
 
     # ── Group loader ──────────────────────────────────────────────────────────
     def _load_group(group_key: str):
-        arr    = _get_pax_canvas(group_key)
+        arr    = _get_canvas(group_key, 'pax')
         Hn, Wn = arr.shape
         img_src.data = dict(image=[_flip(arr)], x=[0], y=[0], dw=[Wn], dh=[Hn])
         pax_fig.x_range.start, pax_fig.x_range.end = 0, Wn
@@ -505,31 +560,17 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
         # Collect all channel arrays for this patch
         ch_arrays: list[np.ndarray] = []
 
-        # Ch 0: paxillin from active patch normalization
-        active_patches = patch_arrays.get(_active_norm[0], patches_raw)
-        if active_patches is not None:
-            ch_arrays.append(active_patches[idx].astype(np.float32))
-        else:
-            ch_arrays.append(np.zeros((32, 32), dtype=np.float32))
-
-        # Other channels: crop from full-frame allch images
-        allch = _get_allch(_state['group'])
-        cx = int(float(row.get('canvas_cx', 0)))
-        cy = int(float(row.get('canvas_cy', 0)))
+        norm = _active_norm[0]
+        norm_ch_patches = patch_norms.get(norm, {})
         ps = int(row.get('ps', 32))
-        half = ps // 2
-        for ci in side_ch_indices:
-            if allch is not None and ci < allch.shape[0]:
-                C, Hf, Wf = allch.shape
-                y0, y1 = max(0, cy - half), min(Hf, cy + half)
-                x0, x1 = max(0, cx - half), min(Wf, cx + half)
-                patch = allch[ci, y0:y1, x0:x1].astype(np.float32)
-                # Pad if crop hit an edge
-                if patch.shape != (ps, ps):
-                    padded = np.zeros((ps, ps), dtype=np.float32)
-                    padded[:patch.shape[0], :patch.shape[1]] = patch
-                    patch = padded
-                ch_arrays.append(patch)
+        for ch_key in ch_keys:
+            ch_patch_arr = norm_ch_patches.get(ch_key)
+            if ch_patch_arr is None and ch_key == 'pax':
+                ch_patch_arr = (patch_arrays.get(norm)
+                                or patch_arrays.get('cio_inlier')
+                                or patch_arrays.get('raw'))
+            if ch_patch_arr is not None and idx < len(ch_patch_arr):
+                ch_arrays.append(ch_patch_arr[idx].astype(np.float32))
             else:
                 ch_arrays.append(np.zeros((ps, ps), dtype=np.float32))
 
@@ -546,11 +587,13 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
             _show_detail(_last_idx[0])
 
     # ── Patch normalization selector (only shown when >1 normalization exists) ──
-    _norm_keys = list(patch_arrays.keys())
-    _norm_labels = {'raw': 'raw', 'cio_inlier': 'CIO inlier', 'cio_med': 'CIO median'}
+    _norm_keys = list(dict.fromkeys(list(canvas_norms.keys()) + list(patch_norms.keys())))
+    _norm_labels = {'raw': 'raw', 'cio_inlier': 'CIO inlier',
+                    'cio_med': 'CIO median', 'cio_mode': 'CIO mode',
+                    'cio_mode_prt': 'CIO mode-prt'}
     norm_select = pn.widgets.RadioButtonGroup(
         options={_norm_labels.get(k, k): k for k in _norm_keys},
-        value='raw' if 'raw' in _norm_keys else (_norm_keys[0] if _norm_keys else 'raw'),
+        value=_default_norm,
         width=300,
     )
 
@@ -558,6 +601,11 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
         _active_norm[0] = event.new
         hist_col.objects = [_hist_panes.get(event.new, pn.pane.Markdown(''))]
         _apply_rect_colors()
+        arr = _get_canvas(_state['group'], 'pax')
+        img_src.data = dict(image=[_flip(arr)], x=[0], y=[0],
+                            dw=[arr.shape[1]], dh=[arr.shape[0]])
+        _update_side_canvases(_state['group'])
+        _refresh_overlay()
         _refresh_detail()
 
     if len(_norm_keys) > 1:
