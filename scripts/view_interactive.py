@@ -65,8 +65,21 @@ FALLBACK = "#cccccc"
 
 _DATA_CACHE: dict[tuple, tuple] = {}   # keyed by tuple(sorted(paths))
 
-_DS_PALETTE = {'vinc': '#1f77b4', 'ppax': '#ff7f0e',
-               'pfak': '#2ca02c', 'nih3t3': '#d62728'}
+_DS_PALETTE   = {'vinc': '#1f77b4', 'ppax': '#ff7f0e',
+                 'pfak': '#2ca02c', 'nih3t3': '#d62728'}
+
+# Condition colour palette — cycles through tab10 for unknown condition names
+_COND_PALETTE_LIST = [
+    '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+    '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+]
+
+def _cond_color(cond: str, _cache: dict = {}) -> str:
+    if not cond or cond in ('', '?'):
+        return '#aaaaaa'
+    if cond not in _cache:
+        _cache[cond] = _COND_PALETTE_LIST[len(_cache) % len(_COND_PALETTE_LIST)]
+    return _cache[cond]
 
 _CH_IDX   = {'pax': 1, 'zyx': 2, 'act': 3, 'vinc': 0, 'ppax': 0, 'pfak': 0}
 _CH_SHORT  = {'pax': 'pax', 'zyx': 'zyxin', 'act': 'actin',
@@ -169,9 +182,10 @@ def _merge_data_h5s(paths: list[str]):
         return _DATA_CACHE[cache_key]
 
     all_dfs, all_img_raw, all_img_meta = [], [], []
+    all_extra_d: list[dict[str, np.ndarray]] = []  # extra channels per dataset
+    all_n_groups: list[int] = []                   # canvas frame count per dataset
     stem_to_patch: dict[str, tuple[np.ndarray, int]] = {}
     pad_size = image_scale = None
-    extra_ch_images: dict[str, np.ndarray] = {}
     ch_keys: list[str] = ['pax']
     frame_offset = 0
 
@@ -182,8 +196,12 @@ def _merge_data_h5s(paths: list[str]):
             pad_size = pad_d
             image_scale = scale_d
             ch_keys = ckeys_d
-            extra_ch_images = {k: v for k, v in extra_d.items()}
 
+        n_groups = len(im_d) if im_d is not None else 0
+        all_extra_d.append(extra_d)
+        all_n_groups.append(n_groups)
+
+        df_d['ds_name'] = Path(p).parent.name  # used for compound group key
         all_dfs.append(df_d)
 
         if pr_d is not None:
@@ -194,13 +212,37 @@ def _merge_data_h5s(paths: list[str]):
         if im_d is not None and imm_d is not None:
             all_img_raw.append(im_d)
             imm_shifted = imm_d.copy()
-            imm_shifted['frame'] = imm_shifted['frame'] + frame_offset
+            imm_shifted['frame']          = imm_shifted['frame'] + frame_offset
+            imm_shifted['ds_name']        = Path(p).parent.name
+            imm_shifted['compound_group'] = (imm_shifted['ds_name'] + '|' +
+                                             imm_shifted['group'].astype(str))
             all_img_meta.append(imm_shifted)
             frame_offset += len(im_d)
 
     df_merged = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
     images_raw = np.concatenate(all_img_raw, axis=0) if all_img_raw else None
     img_meta   = pd.concat(all_img_meta, ignore_index=True) if all_img_meta else None
+
+    # Build extra_ch_images aligned with images_raw.
+    # Datasets have different marker channels (e.g. vinc-ch0 vs ppax-ch0), so a
+    # channel may be absent from some datasets.  Fill those slots with zeros so
+    # that extra_ch_images[k][fr] stays valid for any global frame index fr.
+    all_ch_keys = {k for ed in all_extra_d for k in ed}
+    ch_shapes: dict[str, tuple] = {}
+    for ed in all_extra_d:
+        for k, arr in ed.items():
+            ch_shapes.setdefault(k, arr.shape[1:])  # (H, W)
+    extra_ch_images: dict[str, np.ndarray] = {}
+    for k in all_ch_keys:
+        arrs = []
+        for ed, ng in zip(all_extra_d, all_n_groups):
+            if k in ed:
+                arrs.append(ed[k])
+            elif ng > 0 and k in ch_shapes:
+                H, W = ch_shapes[k]
+                arrs.append(np.zeros((ng, H, W), dtype=np.float32))
+        if arrs:
+            extra_ch_images[k] = np.concatenate(arrs, axis=0)
 
     result = (df_merged, stem_to_patch, images_raw, img_meta,
               pad_size or 64, image_scale or 1.0, extra_ch_images, ch_keys)
@@ -244,7 +286,8 @@ def load_sources(data_h5: str | list[str] | None, model_h5: str | None):
                          if 'filename' in df_data.columns else df_data.get('name', pd.Series())
 
         # Merge static columns from data.h5 (mean_intensity, annotation, position)
-        static_cols = [c for c in ('filename', 'mean_intensity',
+        static_cols = [c for c in ('filename', 'ds_name', 'group', 'frame_idx',
+                                   'mean_intensity',
                                    'annotation_label', 'annotation_label_name',
                                    'canvas_cx', 'canvas_cy', 'ps')
                        if c in df_data.columns]
@@ -259,6 +302,9 @@ def load_sources(data_h5: str | list[str] | None, model_h5: str | None):
             df_data_static.drop(columns=drop_from_data).rename(columns={'filename': '_data_fn'}),
             on='_stem', how='left',
         ).drop(columns=['_stem'], errors='ignore')
+        # Add compound group key using ds_name from data.h5 (not model's 'dataset' col)
+        if 'ds_name' in df.columns and 'group' in df.columns:
+            df['compound_group'] = df['ds_name'].astype(str) + '|' + df['group'].astype(str)
 
         # Build patches_raw array aligned to model df row order
         if stem_to_patch:
@@ -339,8 +385,11 @@ def _flip_for_bokeh(arr: np.ndarray) -> np.ndarray:
 
 def _get_frame(images_raw: np.ndarray, img_meta: pd.DataFrame,
                group: str, channel: int = 0) -> np.ndarray | None:
-    """Return the canvas array for a given (group, channel)."""
-    matches = img_meta[img_meta['group'].astype(str) == group]
+    """Return the canvas array for a given group key (may be 'ds_name|group' compound key)."""
+    if '|' in group and 'compound_group' in img_meta.columns:
+        matches = img_meta[img_meta['compound_group'] == group]
+    else:
+        matches = img_meta[img_meta['group'].astype(str) == group]
     if matches.empty:
         return None
     if 'channel' in matches.columns:
@@ -468,11 +517,15 @@ def build_app(data_h5: str | list[str] | None = None,
     data_only = not has_umap and not z_cols
     print(f'[view]   data_only={data_only}')
 
-    # Fall back to latent dims if UMAP not available (model mode only)
+    # Fall back: UMAP_proj → z_0/z_1 if UMAP_1/2 not present
     if not data_only:
         if not has_umap:
-            df['UMAP_1'], df['UMAP_2'] = df[z_cols[0]], df[z_cols[1]]
-            print(f'[view]   No UMAP -- showing {z_cols[0]} vs {z_cols[1]}')
+            if 'UMAP_proj_1' in df.columns and 'UMAP_proj_2' in df.columns:
+                df['UMAP_1'], df['UMAP_2'] = df['UMAP_proj_1'], df['UMAP_proj_2']
+                print(f'[view]   No UMAP_1/2 -- using UMAP_proj_1/2')
+            elif z_cols:
+                df['UMAP_1'], df['UMAP_2'] = df[z_cols[0]], df[z_cols[1]]
+                print(f'[view]   No UMAP -- showing {z_cols[0]} vs {z_cols[1]}')
 
     fa_pred  = df.get('fa_pred',  pd.Series([''] * n)).fillna('').astype(str)
     pos_pred = df.get('pos_pred', pd.Series([''] * n)).fillna('').astype(str)
@@ -530,17 +583,31 @@ def build_app(data_h5: str | list[str] | None = None,
             color_fa  = [_label_color(v, FA_COLOR_MAP)  for v in fa_pred],
             color_pos = [_label_color(v, POS_COLOR_MAP) for v in pos_pred],
         )
-        umap_data['color'] = list(umap_data['color_fa'])
+        umap_data['color'] = list(umap_data['color_fa'])  # overwritten below after smart default
         umap_data['dataset'] = (df['dataset'].fillna('unknown').astype(str).values
                                 if 'dataset' in df.columns else np.array(['?'] * n))
         umap_data['split']   = (df['split'].fillna('?').astype(str).values
                                 if 'split'   in df.columns else np.array(['?'] * n))
-        umap_data['color_ds'] = [_DS_PALETTE.get(d, '#9467bd')
-                                 for d in umap_data['dataset']]
+        umap_data['color_ds']   = [_DS_PALETTE.get(d, '#9467bd')
+                                   for d in umap_data['dataset']]
+        _cond_color_cache: dict = {}
+        umap_data['color_cond'] = [_cond_color(c, _cond_color_cache)
+                                   for c in umap_data['condition']]
         has_b64 = 'raw_b64' in df.columns
         if has_b64:
             umap_data['raw_b64']   = df['raw_b64'].values
             umap_data['recon_b64'] = df['recon_b64'].values
+
+        # Smart initial colour: condition > dataset > fa_pred
+        _has_fa_pred  = fa_pred.str.len().gt(0).any()
+        _has_cond     = any(c for c in umap_data['condition'])
+        _has_multi_ds = len(set(umap_data['dataset']) - {'?', 'unknown'}) > 1
+        _default_color = ('fa_pred'   if _has_fa_pred  else
+                          'condition' if _has_cond     else
+                          'dataset'   if _has_multi_ds else 'fa_pred')
+        _init_col_key  = {'fa_pred': 'color_fa', 'condition': 'color_cond',
+                          'dataset': 'color_ds'}.get(_default_color, 'color_fa')
+        umap_data['color'] = list(umap_data[_init_col_key])
 
         umap_src = ColumnDataSource(umap_data)
 
@@ -646,19 +713,21 @@ def build_app(data_h5: str | list[str] | None = None,
 
         # Colour-by selector (pure JS -- no server round-trip)
         color_select = Select(
-            title='Colour by', value='fa_pred',
+            title='Colour by', value=_default_color,
             options=[('fa_pred', 'FA type'), ('pos_pred', 'Position'),
-                     ('dataset', 'Dataset')],
+                     ('condition', 'Condition'), ('dataset', 'Dataset')],
             width=180,
         )
         color_select.js_on_change('value', CustomJS(
             args=dict(src=umap_src, plot=p_umap), code="""
             const d = src.data;
             const col_key = {fa_pred: 'color_fa', pos_pred: 'color_pos',
+                             condition: 'color_cond',
                              dataset: 'color_ds'}[cb_obj.value] || 'color_fa';
             d['color'] = [...d[col_key]];
             src.change.emit();
             const lbl = {fa_pred: 'FA type', pos_pred: 'Position',
+                         condition: 'Condition',
                          dataset: 'Dataset'}[cb_obj.value] || cb_obj.value;
             plot.title.text = 'UMAP  -- ' + lbl
                 + '  (hover = patch tooltip  |  tap = detail panel)';
@@ -690,7 +759,9 @@ def build_app(data_h5: str | list[str] | None = None,
 
     if has_images:
         # Build selector options: "condition | group_key"
-        pg_col   = 'patch_group' if 'patch_group' in df.columns else 'group'
+        # Use compound_group (ds|group) when available to disambiguate multi-dataset
+        pg_col   = ('compound_group' if 'compound_group' in df.columns else
+                    'patch_group'    if 'patch_group'    in df.columns else 'group')
         cond_col = 'condition_name' if 'condition_name' in df.columns else 'condition'
         grp_to_cond: dict = {}
         for _, row in df[[pg_col, cond_col]].dropna().drop_duplicates().iterrows():
@@ -698,7 +769,9 @@ def build_app(data_h5: str | list[str] | None = None,
 
         if images_raw is not None and img_meta is not None:
             # Packed format: images stored in HDF5 array
-            unique_groups = sorted(img_meta['group'].astype(str).unique())
+            grp_col = ('compound_group' if 'compound_group' in img_meta.columns
+                       else 'group')
+            unique_groups = sorted(img_meta[grp_col].astype(str).unique())
             _unique_groups_set = set(unique_groups)
             def _get_canvas(group_key: str) -> np.ndarray | None:
                 frame = _get_frame(images_raw, img_meta, group_key)
@@ -779,6 +852,9 @@ def build_app(data_h5: str | list[str] | None = None,
         # Helper: build rect data for a group (in Bokeh flipped-y coordinates)
         def _rects_for_group(group_key: str, img_H: int) -> dict:
             mask = df[pg_col].astype(str) == group_key
+            # When multiple datasets are merged, also filter by dataset so patches
+            # from other datasets sharing the same condition name don't appear.
+            # compound_group already encodes dataset — no extra filter needed
             sub  = df[mask]
             xs, ys, ws, hs, cols, lws, las, idxs = [], [], [], [], [], [], [], []
             for i, row in sub.iterrows():
@@ -823,7 +899,9 @@ def build_app(data_h5: str | list[str] | None = None,
             _state.update(group=group_key, H=Hn, W=Wn)
             # Update extra channel canvases
             if extra_ch_images and img_meta is not None:
-                grp_meta = img_meta[img_meta['group'].astype(str) == group_key]
+                _grp_col = ('compound_group' if 'compound_group' in img_meta.columns
+                            else 'group')
+                grp_meta = img_meta[img_meta[_grp_col].astype(str) == group_key]
                 if not grp_meta.empty:
                     fr = int(grp_meta.iloc[0]['frame'])
                     for k, ch_src in extra_ch_srcs.items():
@@ -952,10 +1030,12 @@ def build_app(data_h5: str | list[str] | None = None,
 
         # Side patch column: per-channel thumbnails from extra_ch_images
         if extra_ch_images and img_meta is not None:
-            _pg_col = 'patch_group' if 'patch_group' in df.columns else 'group'
+            _pg_col = pg_col  # uses compound_group when available
             row_df  = df.iloc[idx]
             group   = str(row_df.get(_pg_col, ''))
-            grp_meta = img_meta[img_meta['group'].astype(str) == group]
+            _grp_col = ('compound_group' if 'compound_group' in img_meta.columns
+                        else 'group')
+            grp_meta = img_meta[img_meta[_grp_col].astype(str) == group]
             if grp_meta.empty:
                 side_patch_col.objects = []
             else:
@@ -1142,8 +1222,11 @@ def build_app(data_h5: str | list[str] | None = None,
             width=540,
         )
 
+    _data_label = ('+'.join(Path(p).parent.name for p in data_h5)
+                   if isinstance(data_h5, list) else
+                   Path(data_h5).name if data_h5 else '')
     src_label = (Path(model_h5).name if model_h5 else '') + \
-                (' + ' + Path(data_h5).name if data_h5 else '')
+                (' + ' + _data_label if _data_label else '')
     header = pn.pane.HTML(
         f'<h2>Interactive Patch Viewer &nbsp;·&nbsp; '
         f'<code>{src_label}</code>'
