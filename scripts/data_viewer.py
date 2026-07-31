@@ -72,14 +72,21 @@ def _read_h5(path: str):
 
     Returns
     -------
-    df, patches_raw, images_raw, img_meta,
+    df, patch_arrays, images_raw, img_meta,
     images_allch, channel_names, pad_size, image_scale
+      patch_arrays : {key: (N, H, W) float32}  — all available patch normalizations
+                     e.g. {'raw': ..., 'cio_inlier': ..., 'cio_med': ...}
       images_allch : {group_key: (C, H, W) float32}  — all channels per frame
       channel_names: ['paxillin', 'vinculin', 'zyxin', ...]
     """
     with h5py.File(path, 'r') as f:
         df          = pd.read_csv(io.StringIO(f['meta/csv'][()].decode()))
-        patches_raw = f['patches/raw'][()] if 'patches/raw' in f else None
+        # Load all available patch normalisations
+        patch_arrays: dict[str, np.ndarray] = {}
+        if 'patches' in f:
+            for key in f['patches'].keys():
+                patch_arrays[key] = f[f'patches/{key}'][()]
+        patches_raw = patch_arrays.get('raw')
         images_raw  = f['images/raw'][()]  if 'images/raw'  in f else None
         img_meta    = (pd.read_csv(io.StringIO(f['images/meta'][()].decode()))
                        if 'images/meta' in f else None)
@@ -109,7 +116,7 @@ def _read_h5(path: str):
                                else np.zeros_like(chs[0]))
                 images_allch[grp] = np.stack(chs)   # (C, H, W)
 
-    return (df, patches_raw, images_raw, img_meta,
+    return (df, patch_arrays, images_raw, img_meta,
             images_allch, channel_names, ch_keys, pad_size, image_scale)
 
 
@@ -221,10 +228,18 @@ def _rect_color(v: float, show_green: bool, show_magenta: bool, show_red: bool
 
 def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
     print(f'[data_viewer] Loading {data_h5} …', flush=True)
-    (df, patches_raw, images_raw, img_meta,
+    (df, patch_arrays, images_raw, img_meta,
      images_allch, channel_names, ch_keys, pad_size, image_scale) = _read_h5(data_h5)
     n = len(df)
-    patch_maxes = patches_raw.max(axis=(1, 2)) if patches_raw is not None else None
+    patches_raw = patch_arrays.get('raw')
+
+    # Pre-compute per-normalization maxes for grid colouring
+    _patch_maxes_cache: dict[str, np.ndarray | None] = {
+        k: v.max(axis=(1, 2)) for k, v in patch_arrays.items()
+    }
+    _active_norm: list[str] = ['raw']   # mutable single-element list (closure trick)
+    patch_maxes = _patch_maxes_cache.get('raw')
+
     ds_name  = Path(data_h5).parent.name
     n_ch     = len(channel_names)          # total channels (pax + extras)
 
@@ -240,23 +255,29 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
     # ── Histogram panel ───────────────────────────────────────────────────────
     cond_col = 'condition_name' if 'condition_name' in df.columns else 'condition'
     conds    = df[cond_col].fillna('').unique() if cond_col in df.columns else []
-    px_vals  = (patches_raw.flatten().astype(np.float32)
-                if patches_raw is not None else np.zeros(0, dtype=np.float32))
 
-    fig_hist, ax = plt.subplots(figsize=(3.0, 3.0))
-    ax.hist(px_vals, bins=200, color='#888888', alpha=0.75, density=True)
-    ax.axvline(0, color='#4488FF', lw=1.5, ls='--', label='< 0')
-    ax.axvline(1, color='#009944', lw=1.5, ls='--', label='> 1')
-    ax.axvline(2, color='#FF44FF', lw=1.5, ls='--', label='> 2')
-    ax.axvline(4, color='#FF4444', lw=1.5, ls='--', label='> 4')
-    ax.set_xlabel('paxillin intensity')
-    ax.set_ylabel('density')
-    n_b = int((px_vals < 0).sum()); n_g = int((px_vals > 1).sum())
-    n_m = int((px_vals > 2).sum()); n_r = int((px_vals > 4).sum())
-    ax.set_title(f'pax-ch1  N={n}\n<0:{n_b}  >1:{n_g}  >2:{n_m}  >4:{n_r}',
-                 fontsize=10)
-    ax.legend(fontsize=8)
-    fig_hist.tight_layout()
+    def _make_hist_pane(norm_key: str) -> pn.pane.PNG:
+        arr = patch_arrays.get(norm_key)
+        px_vals = arr.flatten().astype(np.float32) if arr is not None else np.zeros(0, np.float32)
+        fig_h, ax = plt.subplots(figsize=(3.0, 3.0))
+        ax.hist(px_vals, bins=200, color='#888888', alpha=0.75, density=True)
+        ax.axvline(0, color='#4488FF', lw=1.5, ls='--', label='< 0')
+        ax.axvline(1, color='#009944', lw=1.5, ls='--', label='> 1')
+        ax.axvline(2, color='#FF44FF', lw=1.5, ls='--', label='> 2')
+        ax.axvline(4, color='#FF4444', lw=1.5, ls='--', label='> 4')
+        ax.set_xlabel('paxillin intensity')
+        ax.set_ylabel('density')
+        n_b = int((px_vals < 0).sum()); n_g = int((px_vals > 1).sum())
+        n_m = int((px_vals > 2).sum()); n_r = int((px_vals > 4).sum())
+        ax.set_title(f'{norm_key}  N={n}\n<0:{n_b}  >1:{n_g}  >2:{n_m}  >4:{n_r}',
+                     fontsize=10)
+        ax.legend(fontsize=8)
+        fig_h.tight_layout()
+        return _fig_to_pane(fig_h, dpi=100)
+
+    # Pre-render histograms for each available normalization
+    _hist_panes: dict[str, pn.pane.PNG] = {k: _make_hist_pane(k) for k in patch_arrays}
+    hist_col = pn.Column(_hist_panes.get('raw', pn.pane.Markdown('')), width=320)
 
     _ch_id_str = '-'.join(ch_canvas_labels)
     dataset_info_html = pn.pane.HTML(
@@ -265,7 +286,6 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
         f'<b>Patches:</b> {n}&nbsp;&nbsp;&nbsp;'
         f'<b>Conditions:</b> {", ".join(str(c) for c in conds)}</div>',
     )
-    hist_col = pn.Column(_fig_to_pane(fig_hist, dpi=100), width=320)
 
     # ── Widgets ───────────────────────────────────────────────────────────────
     _W0, _W1, _W2, _W3 = 105, 140, 115, 85   # column widths: <0 | >1 | >2 | >4
@@ -413,8 +433,10 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
 
     def _apply_rect_colors():
         sg, sm, sr = ck_grid_green.value, ck_grid_magenta.value, ck_grid_red.value
+        active_maxes = _patch_maxes_cache.get(_active_norm[0])
         xs, ys, ws, hs, cols, lws, las, idxs = [], [], [], [], [], [], [], []
-        for (x, y, w, h, mv, di) in _rects_base['data']:
+        for (x, y, w, h, _mv, di) in _rects_base['data']:
+            mv = float(active_maxes[di]) if active_maxes is not None else _mv
             col, lw, la = _rect_color(mv, sg, sm, sr)
             xs.append(x);    ys.append(y);    ws.append(w);   hs.append(h)
             cols.append(col); lws.append(lw); las.append(la); idxs.append(di)
@@ -470,7 +492,8 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
         row   = df.iloc[idx]
         fname = str(row.get('filename', ''))
         cond  = str(row.get('condition_name', row.get('condition', '')))
-        pmax  = float(patch_maxes[idx]) if patch_maxes is not None else float('nan')
+        _active_maxes = _patch_maxes_cache.get(_active_norm[0])
+        pmax  = float(_active_maxes[idx]) if _active_maxes is not None else float('nan')
         pmean = float(row.get('mean_intensity', float('nan')))
         detail_info.object = (
             f'<span style="font-size:11px;white-space:nowrap;">'
@@ -482,9 +505,10 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
         # Collect all channel arrays for this patch
         ch_arrays: list[np.ndarray] = []
 
-        # Ch 0: paxillin from patches_raw
-        if patches_raw is not None:
-            ch_arrays.append(patches_raw[idx].astype(np.float32))
+        # Ch 0: paxillin from active patch normalization
+        active_patches = patch_arrays.get(_active_norm[0], patches_raw)
+        if active_patches is not None:
+            ch_arrays.append(active_patches[idx].astype(np.float32))
         else:
             ch_arrays.append(np.zeros((32, 32), dtype=np.float32))
 
@@ -520,6 +544,24 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
     def _refresh_detail(_=None):
         if _last_idx[0] is not None:
             _show_detail(_last_idx[0])
+
+    # ── Patch normalization selector (only shown when >1 normalization exists) ──
+    _norm_keys = list(patch_arrays.keys())
+    _norm_labels = {'raw': 'raw', 'cio_inlier': 'CIO inlier', 'cio_med': 'CIO median'}
+    norm_select = pn.widgets.RadioButtonGroup(
+        options={_norm_labels.get(k, k): k for k in _norm_keys},
+        value='raw' if 'raw' in _norm_keys else (_norm_keys[0] if _norm_keys else 'raw'),
+        width=300,
+    )
+
+    def _on_norm_change(event):
+        _active_norm[0] = event.new
+        hist_col.objects = [_hist_panes.get(event.new, pn.pane.Markdown(''))]
+        _apply_rect_colors()
+        _refresh_detail()
+
+    if len(_norm_keys) > 1:
+        norm_select.param.watch(_on_norm_change, 'value')
 
     # ── Wire watchers ─────────────────────────────────────────────────────────
     for ck in [ck_blue, ck_green, ck_magenta, ck_red_px]:
@@ -588,8 +630,12 @@ def build_app(data_h5: str, ds_idx: int = 1) -> pn.viewable.Viewable:
     canvas_row = pn.Row(pax_col, right_col)
 
     # ── Bottom row: histogram (left) + patch thumbnails (right) ───────────────
+    norm_row = (pn.Row(
+                    pn.pane.HTML('<b style="font-size:11px;">Patch norm:</b>', width=90),
+                    norm_select,
+                ) if len(_norm_keys) > 1 else pn.Row())
     detail_row = pn.Row(pn.Column(detail_info, width=465), dim_toggle)
-    bottom_row = pn.Row(hist_col, pn.Column(detail_row, patch_pane))
+    bottom_row = pn.Row(hist_col, pn.Column(norm_row, detail_row, patch_pane))
 
     return pn.Column(info_bar, canvas_row, bottom_row)
 
