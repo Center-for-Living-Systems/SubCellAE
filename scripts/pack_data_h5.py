@@ -166,7 +166,8 @@ def _segment_exclude_mask(pax_raw: np.ndarray,
 def _compute_channel_norms(ch_raw: np.ndarray,
                             bg_px: np.ndarray,
                             cell_px: np.ndarray,
-                            scale: float = 5.0) -> dict[str, np.ndarray]:
+                            scale: float = 5.0,
+                            label: str = "") -> dict[str, np.ndarray]:
     """All 4 CIO normalizations for one channel array."""
     def _trimmed_mean(px: np.ndarray) -> float:
         if not px.size: return 0.0
@@ -186,8 +187,18 @@ def _compute_channel_norms(ch_raw: np.ndarray,
     m_bg_mode  = _mode16(bg_px)
 
     if cell_px.size:
-        _p95, _p995 = np.percentile(cell_px, [95, 99.5])
-        _keep = cell_px[(_p95 < cell_px) & (cell_px < _p995)]
+        _p975, _p995 = np.percentile(cell_px, [97.5, 99.5])
+        _keep = cell_px[(_p975 < cell_px) & (cell_px < _p995)]
+        if not len(_keep):
+            # Saturation: flat top band, walk down percentile bands
+            for _lo_pct, _hi_pct in [(95, 97.5), (92.5, 95), (90, 92.5), (85, 90), (80, 85)]:
+                _plo, _phi = np.percentile(cell_px, [_lo_pct, _hi_pct])
+                _keep = cell_px[(_plo < cell_px) & (cell_px <= _phi)]
+                if len(_keep):
+                    tag = label + " " if label else ""
+                    print(f"  [cio_mode_prt] {tag}saturated P97.5=P99.5={_p995*65536:.0f}; "
+                          f"using P{_lo_pct}–P{_hi_pct} band (mean={np.mean(_keep)*65536:.0f})", flush=True)
+                    break
         m_cell_prt = float(np.mean(_keep)) if len(_keep) else m_cell_in
     else:
         m_cell_prt = m_bg_mode + 1.0
@@ -333,7 +344,7 @@ def _normalize_from_raw_czis(
                 bg_px   = ch_arr[true_bg] if true_bg.any() else np.array([0.0], dtype=np.float32)
                 cell_px = ch_arr[seg]     if seg.any()     else np.array([1.0], dtype=np.float32)
 
-                ch_norms = _compute_channel_norms(ch_arr, bg_px, cell_px, scale)
+                ch_norms = _compute_channel_norms(ch_arr, bg_px, cell_px, scale, label=f"{ds}/{ch_key}/{filename}")
                 for nk, norm_arr in ch_norms.items():
                     frame_norms[(nk, ch_key)] = norm_arr
                     padded[(nk, ch_key)] = _pp.image_padding(

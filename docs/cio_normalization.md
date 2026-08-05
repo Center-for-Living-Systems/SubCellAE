@@ -85,13 +85,13 @@ normalised = (I - mode(I[true_bg])) / (trimmed_mean(I[seg]) × 5)
 ### `cio_mode_prt` ✓ preferred
 
 ```
-normalised = (I - mode(I[true_bg])) / (mean(I[seg] | P95 < I < P99.5) - mode(I[true_bg]))
+normalised = (I - mode(I[true_bg])) / (mean(I[seg] | P97.5 < I < P99.5) - mode(I[true_bg]))
 ```
 
 - **Background**: mode of `true_bg` pixels (camera dark-current floor, per channel)
-- **Cell reference**: mean of cell pixels strictly between their own P95 and
+- **Cell reference**: mean of cell pixels strictly between their own P97.5 and
   P99.5 — anchors the scale to the brightest non-saturated FA-rich pixels.
-- **No ×5 factor**: the P95–P99.5 mean is already 4–5 × the trimmed mean, so
+- **No ×5 factor**: the P97.5–P99.5 mean is already 4–5 × the trimmed mean, so
   the resulting range is comparable to `cio_inlier × 5` without needing a
   hand-tuned constant.
 - Naturally self-calibrating across datasets: p99 clusters at ≈ 1.25–1.30
@@ -99,13 +99,39 @@ normalised = (I - mode(I[true_bg])) / (mean(I[seg] | P95 < I < P99.5) - mode(I[t
 - Applied to **all channels** (pax, marker, zyxin, actin) independently,
   each channel using its own background and cell statistics with the shared
   segmentation mask.
+- **Saturation fallback**: if the P97.5–P99.5 band is empty (channel saturated),
+  walks down percentile bands (P95–P97.5, P92.5–P95, …) until a non-empty band
+  is found.  A warning is printed naming the channel and the fallback band used.
 
-| dataset | min | p1 | p95 | p99 | p99.5 | p99.8 |
-|---------|-----|----|-----|-----|-------|-------|
-| vinc    | −0.002 | −0.001 | 0.81 | 1.15 | 1.27 | 1.43 |
-| nih3t3  | −0.003 | −0.001 | 0.63 | 1.30 | 1.65 | 2.18 |
-| ppax    | −0.002 | −0.001 | 0.64 | 1.29 | 1.58 | 1.98 |
-| pfak    | −0.002 | −0.000 | 0.62 | 1.29 | 1.56 | 1.88 |
+Percentiles below are per-channel, P97.5–P99.5 formula.
+
+| dataset | channel | min | p1 | p95 | p99 | p99.5 | p99.8 | max |
+|---------|---------|-----|----|-----|-----|-------|-------|-----|
+| vinc    | pax    | −0.002 | −0.001 | 0.735 | 1.034 | 1.135 | 1.272 | 4.88 |
+| vinc    | vinc   | −0.002 | −0.001 | 0.691 | 1.036 | 1.172 | 1.355 | 5.85 |
+| vinc    | zyx    | −0.011 | −0.003 | 0.621 | 1.042 | 1.260 | 1.586 | 8.46 |
+| vinc    | act    | −0.003 | −0.000 | 0.648 | 1.047 | 1.209 | 1.447 | 3.55 |
+| pfak    | pax    | −0.002 | −0.000 | 0.503 | 1.053 | 1.271 | 1.549 | 4.57 |
+| pfak    | pfak ‡ | −0.001 | −0.000 | 1.759 | 2.188 | 2.188 | 2.188 | 2.19 |
+| pfak    | zyx    | −0.075 | −0.010 | 0.563 | 1.053 | 1.297 | 1.616 | 6.52 |
+| pfak    | act    | −0.009 | −0.002 | 0.959 | 1.005 | 1.059 | 1.107 | 1.41 |
+| ppax    | pax    | −0.002 | −0.000 | 0.525 | 1.050 | 1.287 | 1.611 | 6.09 |
+| ppax    | ppax   | −0.003 | −0.001 | 0.447 | 1.060 | 1.380 | 1.832 | 5.96 |
+| ppax    | zyx    | −0.019 | −0.001 | 0.629 | 1.049 | 1.248 | 1.557 | 8.60 |
+| ppax    | act    | −0.009 | −0.002 | 0.749 | 1.032 | 1.059 | 1.182 | 2.52 |
+| nih3t3  | pax    | −0.003 | −0.001 | 0.511 | 1.054 | 1.331 | 1.757 | 7.46 |
+| nih3t3  | vinc   | −0.002 | −0.001 | 0.700 | 1.034 | 1.184 | 1.394 | 5.29 |
+| nih3t3  | zyx    | −0.014 | −0.007 | 0.622 | 1.043 | 1.269 | 1.636 | 9.14 |
+| nih3t3  | act    | −0.001 | −0.000 | 0.657 | 1.039 | 1.194 | 1.373 | 2.93 |
+
+‡ **pfak marker channel saturated**: >30 % of cell pixels sit at the ADC maximum
+  (66 050 counts ≈ 1.008 in [0,1] units).  All percentile bands in the fallback
+  collapse; normalization reverts to trimmed-mean denominator, giving a clipped
+  distribution (max = p99.5 = 2.19).  This is a data-quality issue (camera
+  over-exposed for pFAK); pax / zyx / act channels from the same dataset are fine.
+
+**Key result**: p99 clusters at ≈ 1.03–1.06 across all non-saturated channels
+and all four datasets — effectively self-calibrating with no hand-tuned constant.
 
 ---
 
