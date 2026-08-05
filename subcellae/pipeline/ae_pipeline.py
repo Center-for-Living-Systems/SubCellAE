@@ -152,6 +152,10 @@ class AEConfig:
     # --- model selection ---
     model_type: str = "ae"
 
+    # --- fine-tuning ---
+    pretrained_checkpoint: str = ""   # if set, load these weights before training starts
+    labeled_only: bool        = False  # if True, train only on annotated patches (faster ft)
+
     # --- shared architecture ---
     latent_dim: int   = 8
     input_ps: int     = 32
@@ -961,15 +965,16 @@ def run_ae_pipeline(cfg: AEConfig):
         condition      = int(entry.get("condition", entry.get("label", 0)))
         condition_name = str(entry.get("condition_name", str(condition)))
 
+        # Per-entry annotation keys override the global config when present.
         shared_ann_kwargs = dict(
-            annotation_file   = cfg.annotation_file or None,
-            label_col         = cfg.label_col,
-            filename_col      = cfg.filename_col,
-            label_order       = cfg.label_order,
-            annotation_file_2 = cfg.annotation_file_2 or None,
-            label_col_2       = cfg.label_col_2,
-            filename_col_2    = cfg.filename_col_2,
-            label_order_2     = cfg.label_order_2,
+            annotation_file   = entry.get("annotation_file", cfg.annotation_file) or None,
+            label_col         = entry.get("label_col",    cfg.label_col),
+            filename_col      = entry.get("filename_col", cfg.filename_col),
+            label_order       = entry.get("label_order",  cfg.label_order),
+            annotation_file_2 = entry.get("annotation_file_2", cfg.annotation_file_2) or None,
+            label_col_2       = entry.get("label_col_2",    cfg.label_col_2),
+            filename_col_2    = entry.get("filename_col_2", cfg.filename_col_2),
+            label_order_2     = entry.get("label_order_2",  cfg.label_order_2),
         )
 
         # ── histogram map (optional) ──────────────────────────────────────
@@ -1060,6 +1065,17 @@ def run_ae_pipeline(cfg: AEConfig):
             cfg.num_classes_2 = ds.num_classes_2
             log.info("  annotation2: %d classes via %r  mapping: %s",
                      ds.num_classes_2, cfg.label_col_2, ds.label_to_int_2)
+        # labeled_only: discard unlabeled patches from this dataset
+        if cfg.labeled_only and hasattr(ds, "annotation_labels"):
+            labeled_idx = [i for i, lbl in enumerate(ds.annotation_labels) if lbl >= 0]
+            if labeled_idx:
+                sub = Subset(ds, labeled_idx)
+                sub.paths = [ds.paths[i] for i in labeled_idx]
+                ds = sub
+                log.info("    labeled_only: kept %d/%d annotated patches",
+                         len(labeled_idx), len(labeled_idx) + sum(
+                             1 for lbl in ds.dataset.annotation_labels if lbl < 0))
+
         per_ds_val_splits_raw.append(entry.get("val_split", None))
         datasets.append(ds)
 
@@ -1166,6 +1182,14 @@ def run_ae_pipeline(cfg: AEConfig):
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log.info("  Model: %s  (%.2fM trainable parameters)",
              type(model).__name__, n_params / 1e6)
+
+    if cfg.pretrained_checkpoint:
+        ckpt_path = Path(cfg.pretrained_checkpoint)
+        saved = torch.load(str(ckpt_path), map_location=cfg.device, weights_only=False)
+        # Support both full-model saves (torch.save(model)) and state-dict saves
+        state = saved.state_dict() if hasattr(saved, "state_dict") else saved
+        model.load_state_dict(state)
+        log.info("  Loaded pretrained checkpoint: %s", ckpt_path.name)
 
     # ------------------------------------------------------------------
     # 6. Train

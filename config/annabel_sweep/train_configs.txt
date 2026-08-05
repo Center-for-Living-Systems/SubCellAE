@@ -1,0 +1,9 @@
+config/annabel_sweep/ae_annabel_vinc_conae_s1v3.yaml
+config/annabel_sweep/ae_annabel_vinc_conae_s2v2.yaml
+config/annabel_sweep/ae_annabel_vinc_conae_s3v1.yaml
+config/annabel_sweep/ae_annabel_vinc_supcon2_s1v3.yaml
+config/annabel_sweep/ae_annabel_vinc_supcon2_s2v2.yaml
+config/annabel_sweep/ae_annabel_vinc_supcon2_s3v1.yaml
+config/annabel_sweep/ae_annabel_vinc_supcon5_s1v3.yaml
+config/annabel_sweep/ae_annabel_vinc_supcon5_s2v2.yaml
+config/annabel_sweep/ae_annabel_vinc_supcon5_s3v1.yaml

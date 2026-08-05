@@ -128,7 +128,8 @@ def _read_ch_names(result_dir: Path) -> list[str] | None:
     return None
 
 
-def run(result_dir: Path, k: int = 10, n_panel: int = N_PANEL):
+def run(result_dir: Path, k: int = 10, n_panel: int = N_PANEL,
+        out_dir: Path | None = None):
     csv_path = result_dir / "latents.csv"
     if not csv_path.exists():
         sys.exit(f"latents.csv not found in {result_dir}")
@@ -143,7 +144,8 @@ def run(result_dir: Path, k: int = 10, n_panel: int = N_PANEL):
     ch_names = _read_ch_names(result_dir)
     print(f"  Channel names: {ch_names}", flush=True)
 
-    out_dir = result_dir / "eval" / "cluster_panels"
+    if out_dir is None:
+        out_dir = result_dir / "eval" / "cluster_panels"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading latents: {result_dir.name}", flush=True)
@@ -250,8 +252,10 @@ def main():
                         help="Number of KMeans clusters (default 10)")
     parser.add_argument("--n-panel", type=int, default=N_PANEL,
                         help="Patches per panel (default 16)")
+    parser.add_argument("--out-dir", type=Path, default=None,
+                        help="Output directory (default: <result_dir>/eval/cluster_panels)")
     args = parser.parse_args()
-    run(args.result_dir, k=args.k, n_panel=args.n_panel)
+    run(args.result_dir, k=args.k, n_panel=args.n_panel, out_dir=args.out_dir)
 
 
 if __name__ == "__main__":

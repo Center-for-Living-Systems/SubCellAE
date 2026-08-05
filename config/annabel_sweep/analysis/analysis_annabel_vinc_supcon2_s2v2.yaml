@@ -1,0 +1,34 @@
+# =============================================================================
+# Analysis — annabel_vinc_supcon2_s2v2
+# =============================================================================
+root_folder : "/net/projects/CLS/lding/data/fa_data_analysis"
+
+input:
+  latents_csv  : root_folder + "/ae_results/contrastive_run/annabel_vinc_supcon2_s2v2/latents.csv"
+  split_filter : "all"
+
+output:
+  out_dir : root_folder + "/ae_results/contrastive_run/annabel_vinc_supcon2_s2v2/analysis"
+
+embedding:
+  methods:
+    - UMAP
+  umap_n_neighbors  : 15
+  umap_min_dist     : 0.1
+  umap_random_state : 42
+
+clustering:
+  kmeans_enabled    : true
+  kmeans_n_clusters : 5
+  dbscan_enabled    : false
+  boxplot_kind      : "violin"
+
+label_orders:
+  annotation_label_name:
+    - "No adhesion"
+    - "adhesion"
+  condition_name:
+    - "control"
+
+misc:
+  log_level : "INFO"

@@ -907,8 +907,10 @@ def run_classification_pipeline(cfg: ClassificationConfig) -> dict:
 
     # Save per-class metrics CSV
     from sklearn.metrics import classification_report as _cr
+    present_labels = sorted(set(y_val) | set(metrics["y_pred"]))
     report_dict = _cr(y_val, metrics["y_pred"],
-                      target_names=label_order,
+                      labels=present_labels,
+                      target_names=[label_order[i] for i in present_labels],
                       zero_division=0, output_dict=True)
     metrics_rows = [
         {
