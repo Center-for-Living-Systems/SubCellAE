@@ -1500,6 +1500,6 @@ Examples:
             _host_ip = '0.0.0.0'
         print(f'[view] Serving on http://{_host_ip}:{_args.port}')
         pn.serve(_app, address='0.0.0.0', port=_args.port,
-                 allow_websocket_origin=['*'], show=False, autoreload=False)
+                 websocket_origin=['*'], show=False, autoreload=False)
     else:
         pn.serve(_app, show=True, port=_args.port, autoreload=False)
