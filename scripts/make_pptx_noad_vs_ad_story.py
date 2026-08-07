@@ -56,6 +56,14 @@ C_WARN   = RGBColor(0x8B, 0x45, 0x00)   # dark orange
 C_GREY   = RGBColor(0x66, 0x66, 0x66)
 C_BLACK  = RGBColor(0x00, 0x00, 0x00)
 
+# Dataset display name mapping (internal key → slide label)
+DS_DISPLAY = {
+    "vinc":   "dataset1",
+    "pfak":   "dataset2",
+    "ppax":   "dataset3",
+    "nih3t3": "dataset4",
+}
+
 # ---------------------------------------------------------------------------
 # Core helpers
 # ---------------------------------------------------------------------------
@@ -155,7 +163,7 @@ def _fig_label_dist_annabel():
     bars = ax.bar(range(len(LABEL_ORDER_5)), counts5.values, color=colors5, edgecolor="white")
     ax.set_xticks(range(len(LABEL_ORDER_5)))
     ax.set_xticklabels(["No adh.","Nascent","FC","FA","Fibrillar"], fontsize=9, rotation=20, ha="right")
-    ax.set_title("5-class labels (Annabel, vinc ctrl)", fontsize=10)
+    ax.set_title("5-class labels (Annabel, dataset1 ctrl)", fontsize=10)
     ax.set_ylabel("# patches"); ax.set_facecolor("white"); ax.spines[["top","right"]].set_visible(False)
     for b, v in zip(bars, counts5.values):
         ax.text(b.get_x()+b.get_width()/2, b.get_height()+1, str(int(v)), ha="center", fontsize=8)
@@ -196,10 +204,10 @@ def _fig_inter_annotator():
     ep_ev = merged_ep[merged_ep["m2"] != "skip"]
 
     rows = [
-        ("Annabel vs\nMargaret\n(vinc ctrl)", len(merged_av), len(av_ev),
+        ("Annabel vs\nMargaret\n(dataset1 ctrl)", len(merged_av), len(av_ev),
          (av_ev["a2"] == av_ev["m2"]).sum(), len(av_ev),
          (merged_av["label"] == merged_av["classification"]).sum(), len(merged_av)),
-        ("Ernest vs\nMargaret\n(ppax ctrl)", len(merged_ep), len(ep_ev),
+        ("Ernest vs\nMargaret\n(dataset3 ctrl)", len(merged_ep), len(ep_ev),
          (ep_ev["e2"] == ep_ev["m2"]).sum(), len(ep_ev),
          (merged_ep["label"] == merged_ep["classification"]).sum(), len(merged_ep)),
     ]
@@ -233,7 +241,7 @@ def _fig_inter_annotator():
 
 def _fig_accuracy_heatmap():
     """Heatmap: supcon2 accuracy across datasets × splits × features."""
-    DS_LABELS = ["vinc\nctrl","vinc\nycomp","ppax\nctrl\n(Margaret)","pfak\nctrl","ppax\nctrl\n(Ernest)"]
+    DS_LABELS = ["dataset1\nctrl","dataset1\nycomp","dataset3\nctrl\n(Margaret)","dataset2\nctrl","dataset3\nctrl\n(Ernest)"]
     DS_KEYS   = [
         ("vinc","control","blind","zrecon"),
         ("vinc","ycomp",  "blind","zrecon"),
@@ -274,7 +282,7 @@ def _fig_accuracy_heatmap():
 
 def _fig_zrecon_vs_zproj():
     """Bar comparison: z_recon vs z_proj accuracy for supcon2 (best split = s2v2)."""
-    DS_LABELS  = ["vinc/ctrl","vinc/ycomp","ppax/ctrl\n(Margaret)","pfak/ctrl"]
+    DS_LABELS  = ["dataset1/ctrl","dataset1/ycomp","dataset3/ctrl\n(Margaret)","dataset2/ctrl"]
     DS_KEYS    = [("vinc","control"),("vinc","ycomp"),("ppax","control"),("pfak","control")]
 
     accs = {feat: [] for feat in FEATS}
@@ -325,7 +333,7 @@ def _fig_indomain_val():
     b2 = ax.bar(x + w/2, zp, w, label="z_proj",  color="#F28E2B", edgecolor="white")
     ax.set_xticks(x); ax.set_xticklabels(SPLITS, fontsize=10)
     ax.set_ylim(0.8, 1.05); ax.set_ylabel("Macro-F1 (val)")
-    ax.set_title("SupCon-2cls — in-domain validation (Annabel vinc ctrl)", fontsize=11)
+    ax.set_title("SupCon-2cls — in-domain validation (Annabel dataset1 ctrl)", fontsize=11)
     ax.set_facecolor("white"); ax.spines[["top","right"]].set_visible(False)
     ax.legend(fontsize=9); ax.axhline(1.0, color="#AAAAAA", lw=0.8, ls="--")
     for b, vals_list in [(b1, zr), (b2, zp)]:
@@ -349,7 +357,7 @@ def slide_title(prs):
          Inches(0.8), Inches(3.2), Inches(11.7), Inches(0.6),
          size_pt=20, color=C_ACCENT)
     _txt(sl,
-         "SupCon-2cls   •   Annabel vinc labels (539 patches)   •   Blind test: vinc / ppax / pfak\n"
+         "SupCon-2cls   •   Annabel dataset1 labels (539 patches)   •   Blind test: dataset1 / dataset3 / dataset2\n"
          "z_recon 12-d  |  z_proj 8-d  |  LightGBM classifier  |  pax channel",
          Inches(0.8), Inches(4.0), Inches(11.7), Inches(0.8),
          size_pt=13, color=C_GREY)
@@ -361,7 +369,7 @@ def slide_study_design(prs):
     _slide_header(sl, "Study Design", "Two-class binary detection: adhesion present or absent")
     body = (
         "Training data (single annotator — Annabel)\n"
-        "  •  539 vinc/control patches  •  4 images (f0000–f0003)  •  pax channel\n"
+        "  •  539 dataset1/control patches  •  4 images (f0000–f0003)  •  pax channel\n"
         "  •  5 FA subtypes remapped → 2 classes: No adhesion | adhesion\n\n"
         "Model: SupCon-2cls  (supervised contrastive loss)\n"
         "  •  Latent dim = 12 (z_recon)   Projection dim = 8 (z_proj)\n"
@@ -370,15 +378,15 @@ def slide_study_design(prs):
         "Evaluation\n"
         "  In-domain val  — Annabel's own held-out images\n"
         "  Blind test     — Margaret's independent labels (labels_*_20260521.csv)\n"
-        "                   vinc/ctrl  |  vinc/ycomp  |  ppax/ctrl  |  pfak/ctrl\n"
-        "  Ernest test    — Ernest's ppax/ctrl labels (all FA patches, no No-adhesion)"
+        "                   dataset1/ctrl  |  dataset1/ycomp  |  dataset3/ctrl  |  dataset2/ctrl\n"
+        "  Ernest test    — Ernest's dataset3/ctrl labels (all FA patches, no No-adhesion)"
     )
     _txt(sl, body, Inches(0.55), Inches(1.1), Inches(12.2), Inches(5.8), size_pt=13)
 
 
 def slide_training_data(prs):
     sl = _blank(prs)
-    _slide_header(sl, "Training Data", "Annabel's vinc/control labels — 539 patches, 4 frames")
+    _slide_header(sl, "Training Data", "Annabel's dataset1/control labels — 539 patches, 4 frames")
 
     # label distribution figure left
     fig = _fig_label_dist_annabel()
@@ -430,11 +438,11 @@ def slide_inter_annotator(prs):
 
     notes = (
         "Key observations\n\n"
-        "Annabel vs Margaret (vinc ctrl)\n"
+        "Annabel vs Margaret (dataset1 ctrl)\n"
         "  Overlap: 18 patches\n"
         "  2-class: 17/17 agree  (100%)\n"
         "  5-class: 13/18 agree  (72%)\n\n"
-        "Ernest vs Margaret (ppax ctrl)\n"
+        "Ernest vs Margaret (dataset3 ctrl)\n"
         "  Overlap: 25 patches\n"
         "  2-class: n/a (Ernest has\n"
         "     no 'No adhesion' labels)\n"
@@ -454,18 +462,18 @@ def slide_inter_annotator(prs):
 
 def slide_ernest_ppax(prs):
     sl = _blank(prs)
-    _slide_header(sl, "Ernest's ppax Labels",
-                  "Independent labeling — ppax/control, 2 frames, 111 patches")
+    _slide_header(sl, "Ernest's dataset3 Labels",
+                  "Independent labeling — dataset3/control, 2 frames, 111 patches")
     body = (
         "Ernest labeled only FA-positive patches (no 'No adhesion' assigned)\n\n"
         "  f0000:   55 patches   (35 focal adhesion, 15 Nascent Adhesion, 5 focal complex)\n"
         "  f0009:   56 patches   (23 focal adhesion, 10 Nascent Adhesion, 18 focal complex, 5 fibrillar)\n\n"
-        "Comparison with Margaret's ppax labels (60 patches, f0000 only):\n"
+        "Comparison with Margaret's dataset3 labels (60 patches, f0000 only):\n"
         "  Overlap: 25 patches  →  5-class agreement: 20/25 (80%)\n"
         "  Ernest has no 'No adhesion' entries; Margaret has 15 'No adhesion' + 9 'Uncertain'\n"
         "  Different labeling strategy: Ernest focused on FA structure, Margaret included background\n\n"
         "Use in blind test:\n"
-        "  Apply all 9 trained models to ppax/control patches\n"
+        "  Apply all 9 trained models to dataset3/control patches\n"
         "  Match predictions on Ernest's 111 patches by filename\n"
         "  For SupCon-2cls: remap Ernest's subtypes → 'adhesion' (all 111 should be predicted adhesion)\n"
         "  For ConAE / SupCon-5cls: evaluate subtype classification"
@@ -529,7 +537,7 @@ def slide_model_config(prs):
 def slide_indomain_val(prs):
     sl = _blank(prs)
     _slide_header(sl, "In-Domain Validation",
-                  "SupCon-2cls evaluated on Annabel's held-out vinc/control images")
+                  "SupCon-2cls evaluated on Annabel's held-out dataset1/control images")
 
     fig = _fig_indomain_val()
     _add_fig(sl, fig, Inches(0.5), Inches(1.1), Inches(7.0), Inches(3.5))
@@ -579,7 +587,7 @@ def slide_umap_annotation_vs_pred(prs):
     for split in SPLITS:
         sl = _blank(prs)
         _slide_header(sl, f"UMAP — Annotation vs Prediction  ({split})",
-                      "z_recon (12-d) · all Annabel vinc/control patches · SupCon-2cls LightGBM")
+                      "z_recon (12-d) · all Annabel dataset1/control patches · SupCon-2cls LightGBM")
 
         base = RUN_DIR / f"annabel_vinc_supcon2_{split}" / "fa_cls_zrecon"
 
@@ -601,7 +609,7 @@ def slide_umap_annotation_vs_pred(prs):
                    Inches(6.8), y_img, img_w, img_h, "[predicted UMAP]")
 
         _txt(sl,
-             "UMAP fitted on all vinc/control patches (train+val). "
+             "UMAP fitted on all dataset1/control patches (train+val). "
              "Left: Annabel's 5-class labels. Right: 2-class LightGBM predictions (No adhesion / adhesion).",
              Inches(0.3), Inches(6.9), Inches(12.7), Inches(0.3), size_pt=10, color=C_GREY)
 
@@ -617,7 +625,7 @@ def slide_prediction_overlays(prs, split: str = "s2v2"):
             continue
         sl = _blank(prs)
         _slide_header(sl, f"Prediction Overlay — frame {fr:04d}  ({split}  z_recon)",
-                      "Left: vinc channel  •  Centre: prediction overlay  "
+                      "Left: dataset1 channel  •  Centre: prediction overlay  "
                       "•  Right: annotation vs prediction (labelled patches only)")
         _img_or_ph(sl, img_path,
                    Inches(0.3), Inches(1.05), Inches(12.73), Inches(6.0),
@@ -635,7 +643,7 @@ def slide_prediction_overlays(prs, split: str = "s2v2"):
             continue
         sl = _blank(prs)
         _slide_header(sl, f"Prediction Overlay — frame {fr:04d}  ({split}  z_recon)",
-                      "Left: vinc channel  •  Right: prediction overlay  (no annotation available)")
+                      "Left: dataset1 channel  •  Right: prediction overlay  (no annotation available)")
         _img_or_ph(sl, img_path,
                    Inches(1.8), Inches(1.05), Inches(9.73), Inches(5.8),
                    f"[pred-only overlay frame {fr:04d}]")
@@ -667,7 +675,8 @@ def slide_prediction_overlays(prs, split: str = "s2v2"):
 def _slide_blind_test_dataset(prs, ds: str, cond: str, label_src: str,
                                n_labeled: int, n_eval: int, extra_note: str = ""):
     sl = _blank(prs)
-    title = f"Blind Test — {ds}/{cond}  ({label_src})"
+    ds_lbl = DS_DISPLAY.get(ds, ds)
+    title = f"Blind Test — {ds_lbl}/{cond}  ({label_src})"
     note  = f"{n_labeled} labeled patches  •  {n_eval} evaluated (Uncertain excluded)"
     _slide_header(sl, title, note + (f"  •  {extra_note}" if extra_note else ""))
 
@@ -717,7 +726,7 @@ def _slide_blind_test_dataset(prs, ds: str, cond: str, label_src: str,
 
 def slide_ernest_result(prs):
     sl = _blank(prs)
-    _slide_header(sl, "Blind Test — ppax/control (Ernest's Labels)",
+    _slide_header(sl, "Blind Test — dataset3/control (Ernest's Labels)",
                   "111 patches, all FA-positive (no 'No adhesion')  •  2 frames: f0000, f0009")
 
     col_w = Inches(2.0)
@@ -788,11 +797,11 @@ def slide_heatmap(prs):
     _add_fig(sl, fig, Inches(0.5), Inches(1.1), Inches(12.3), Inches(3.8))
 
     _txt(sl,
-         "pfak/ctrl  →  near-perfect (pax channel FA morphology closely matches vinc training data)\n"
-         "vinc/ctrl  →  high (same dataset, different annotator; 2-class boundary is annotator-invariant)\n"
-         "vinc/ycomp →  moderate (Y-27632 compound alters FA landscape — more no-adhesion regions)\n"
-         "ppax/ctrl  →  variable (phospho-paxillin marker; Margaret: 15 No-ad patches tested)\n"
-         "ppax/Ernest →  98–100% (all 111 Ernest patches correctly called adhesion)",
+         "dataset2/ctrl  →  near-perfect (pax channel FA morphology closely matches dataset1 training data)\n"
+         "dataset1/ctrl  →  high (same dataset, different annotator; 2-class boundary is annotator-invariant)\n"
+         "dataset1/ycomp →  moderate (Y-27632 compound alters FA landscape — more no-adhesion regions)\n"
+         "dataset3/ctrl  →  variable (phospho-paxillin marker; Margaret: 15 No-ad patches tested)\n"
+         "dataset3/Ernest →  98–100% (all 111 Ernest patches correctly called adhesion)",
          Inches(0.5), Inches(5.1), Inches(12.3), Inches(1.9), size_pt=12)
 
 
@@ -810,17 +819,17 @@ def slide_findings(prs):
          "SupCon-2cls achieves macro-F1 ≥ 0.93 on held-out images (same dataset, same annotator). "
          "All 3 train/val splits (s1v3, s2v2, s3v1) converge to the same range."),
         ("Cross-dataset generalisation",
-         "Trained on 539 vinc/control patches (Annabel), the model correctly detects adhesions in:\n"
-         "  vinc/ctrl (78–80% acc)  |  vinc/ycomp (61–72%)  |  pfak/ctrl (93–100%)\n"
-         "  ppax/ctrl (71–82%)  |  Ernest's ppax FA patches (98–100%)"),
+         "Trained on 539 dataset1/control patches (Annabel), the model correctly detects adhesions in:\n"
+         "  dataset1/ctrl (78–80% acc)  |  dataset1/ycomp (61–72%)  |  dataset2/ctrl (93–100%)\n"
+         "  dataset3/ctrl (71–82%)  |  Ernest's dataset3 FA patches (98–100%)"),
         ("z_recon > z_proj for new data",
          "The 12-d reconstruction latent transfers better out-of-distribution than the 8-d "
          "projection head. z_proj is marginally better in-domain; z_recon leads on every OOD set. "
          "The reconstruction constraint keeps representations image-grounded."),
         ("Dataset-specific transferability",
-         "pfak transfers best (same pax channel, similar FA structures). "
-         "vinc/ycomp is hardest — compound treatment shifts the FA landscape. "
-         "ppax (phospho-paxillin) is intermediate; FA morphology is recognisable "
+         "dataset2 transfers best (same pax channel, similar FA structures). "
+         "dataset1/ycomp is hardest — compound treatment shifts the FA landscape. "
+         "dataset3 (phospho-paxillin) is intermediate; FA morphology is recognisable "
          "despite marker difference."),
     ]
 
@@ -838,12 +847,12 @@ def slide_findings(prs):
 # ---------------------------------------------------------------------------
 
 TWOSTAGE_EVALS = [
-    ("indomain_val",         "In-Domain Val",       "Annabel vinc/ctrl held-out"),
-    ("vinc_control_margaret","vinc/control",         "Margaret labels_vinc_20260521"),
-    ("vinc_ycomp_margaret",  "vinc/ycomp",           "Margaret labels_vinc_20260521 · Y-27632"),
-    ("ppax_control_margaret","ppax/control",          "Margaret labels_ppax_20260521"),
-    ("pfak_control_margaret","pfak/control",          "Margaret labels_pfak_20260521"),
-    ("ppax_ernest",          "ppax/control (Ernest)", "Ernest FA-only labels · 111 patches"),
+    ("indomain_val",         "In-Domain Val",             "Annabel dataset1/ctrl held-out"),
+    ("vinc_control_margaret","dataset1/control",           "Margaret labels_vinc_20260521"),
+    ("vinc_ycomp_margaret",  "dataset1/ycomp",             "Margaret labels_vinc_20260521 · Y-27632"),
+    ("ppax_control_margaret","dataset3/control",           "Margaret labels_ppax_20260521"),
+    ("pfak_control_margaret","dataset2/control",           "Margaret labels_pfak_20260521"),
+    ("ppax_ernest",          "dataset3/control (Ernest)",  "Ernest FA-only labels · 111 patches"),
 ]
 
 
@@ -993,7 +1002,7 @@ def _fig_twostage_summary():
     ts = pd.read_csv(ts_path)
     evals = ["indomain_val","vinc_control_margaret","vinc_ycomp_margaret",
              "ppax_control_margaret","pfak_control_margaret","ppax_ernest"]
-    eval_labels = ["indomain\nval","vinc\nctrl","vinc\nycomp","ppax\nctrl","pfak\nctrl","ppax\nErnest"]
+    eval_labels = ["indomain\nval","dataset1\nctrl","dataset1\nycomp","dataset3\nctrl","dataset2\nctrl","dataset3\nErnest"]
 
     # Build acc matrix: rows=splits, cols=evals
     acc_mat  = np.full((3, len(evals)), np.nan)
@@ -1034,9 +1043,9 @@ def slide_twostage_summary(prs):
 
     _txt(sl,
          "Key observations:\n"
-         "• pfak/ctrl: highest OOD accuracy (0.78–0.82) — pax channel FA morphology transfers well\n"
-         "• vinc/ctrl: moderate (0.60–0.62) — 5-class is harder than 2-class; focal complex missed (0% recall)\n"
-         "• vinc/ycomp: lowest accuracy (0.35–0.46) — Y-27632 shifts FA landscape; model not trained on perturbation\n"
+         "• dataset2/ctrl: highest OOD accuracy (0.78–0.82) — pax channel FA morphology transfers well\n"
+         "• dataset1/ctrl: moderate (0.60–0.62) — 5-class is harder than 2-class; focal complex missed (0% recall)\n"
+         "• dataset1/ycomp: lowest accuracy (0.35–0.46) — Y-27632 shifts FA landscape; model not trained on perturbation\n"
          "• focal complex + fibrillar adhesion: consistently 0% recall — data bottleneck (3–6 training samples)\n"
          "• Two-stage adds subtype info but drops overall acc vs pure 2-class (expected: harder problem)",
          Inches(0.4), Inches(4.35), Inches(12.5), Inches(2.8),
@@ -1074,8 +1083,8 @@ def _img_ar(slide, path, box_left, box_top, box_w, box_h, label="[pending]"):
 
 
 _CROSSDS_CFG = [
-    ("ppax",   1, "ppax / control — phospho-paxillin channel"),
-    ("pfak",   6, "pfak / control — phospho-FAK channel"),
+    ("ppax",   1, "dataset3 / control — phospho-paxillin channel"),
+    ("pfak",   6, "dataset2 / control — phospho-FAK channel"),
 ]
 
 
@@ -1089,7 +1098,7 @@ def slide_crossds_overlays(prs, split: str = "s2v2"):
         _slide_header(sl,
                       f"Cross-Dataset Prediction — {label}",
                       f"Left: raw channel  •  Right: prediction overlay  "
-                      f"(model trained on vinc/control, {split})")
+                      f"(model trained on dataset1/control, {split})")
         _img_ar(sl, img_path,
                 Inches(0.3), Inches(1.05), Inches(12.73), Inches(6.0),
                 f"[crossds {ds} frame {frame:04d}]")
@@ -1107,10 +1116,21 @@ def slide_crossds_overlays(prs, split: str = "s2v2"):
 _FT_CMP_DIR = RUN_DIR / "annabel_vinc_supcon2_s2v2" / "fa_cls_zrecon" / "ft_comparison"
 
 _FT_FRAMES = [
-    ("ppax", 0,    "ppax / control — phospho-paxillin",  "labeled frame (f0000)  •  used in fine-tuning",  True),
-    ("ppax", 3,    "ppax / control — phospho-paxillin",  "unlabeled frame (f0003)  •  generalization test", False),
-    ("pfak", 0,    "pfak / control — phospho-FAK",       "labeled frame (f0000)  •  used in fine-tuning",  True),
-    ("pfak", 6,    "pfak / control — phospho-FAK",       "unlabeled frame (f0006)  •  generalization test", False),
+    # dataset1 / control — Margaret's labels (spread across all 50 frames)
+    ("vinc_control", 12, "dataset1 / control — paxillin (Margaret labels)",
+     "labeled frame (f0012)  •  26 patches, 13 adh / 13 no-adh  (balanced)",  True),
+    ("vinc_control", 17, "dataset1 / control — paxillin (Margaret labels)",
+     "labeled frame (f0017)  •  25 patches, 20 adh / 5 no-adh",               True),
+    ("vinc_control",  0, "dataset1 / control — paxillin (Margaret labels)",
+     "labeled frame (f0000)  •  reference frame",                              True),
+    # dataset3 / control — phospho-paxillin
+    ("ppax", 0, "dataset3 / control — phospho-paxillin", "labeled frame (f0000)  •  used in fine-tuning",  True),
+    ("ppax", 1, "dataset3 / control — phospho-paxillin", "unlabeled frame (f0001)  •  generalization test", False),
+    ("ppax", 6, "dataset3 / control — phospho-paxillin", "unlabeled frame (f0006)  •  generalization test", False),
+    # dataset2 / control — phospho-FAK
+    ("pfak", 0, "dataset2 / control — phospho-FAK",      "labeled frame (f0000)  •  used in fine-tuning",  True),
+    ("pfak", 1, "dataset2 / control — phospho-FAK",      "unlabeled frame (f0001)  •  generalization test", False),
+    ("pfak", 6, "dataset2 / control — phospho-FAK",      "unlabeled frame (f0006)  •  generalization test", False),
 ]
 
 
@@ -1122,66 +1142,50 @@ def slide_finetune_title(prs):
          bold=True, size_pt=32, color=C_TITLE)
     _rule(sl, Inches(2.65), width=Inches(11.7), left=Inches(0.8))
     body = (
-        "Adapting the trained model to ppax & pfak datasets\n\n"
+        "Adapting the trained model to dataset1 (Margaret), dataset3 & dataset2 datasets\n\n"
         "Step 1 — Classifier-only fine-tuning  (this section)\n"
-        "  •  AE encoder unchanged  (trained on vinc/control only)\n"
-        "  •  LightGBM retrained on vinc + 51 ppax + 54 pfak labeled patches\n"
-        "  •  Shows impact of ~100 cross-dataset labels on the decision boundary\n\n"
-        "Step 2 — Full AE + classifier fine-tuning  (completed — 50 epochs, best at epoch 36)\n"
-        "  •  AE encoder fine-tuned on all three datasets (labeled patches only, 644 total)\n"
-        "  •  LightGBM then retrained on the new fine-tuned latent space\n"
-        "  •  Improves latent-space alignment across datasets (see following slides)"
+        "  •  AE encoder unchanged  (trained on dataset1/control Annabel only)\n"
+        "  •  dataset1 (Margaret): LightGBM retrained on Annabel + Margaret vinc latents  "
+        "(539 + 377 = 899 unique patches)\n"
+        "  •  Accuracy on Margaret labels — orig: 80.1%   cls FT Annabel-only: 80.1%  "
+        "  cls FT Annabel+Margaret: ~100% (train≈test)\n"
+        "  •  dataset3 & dataset2: LightGBM retrained on dataset1 + 51 dataset3 + 54 dataset2 patches\n\n"
+        "Step 2 — Full AE + classifier fine-tuning\n"
+        "  •  dataset1: AE fine-tuned on Annabel + Margaret vinc labels (899 patches)  [in progress]\n"
+        "  •  dataset3 & dataset2: AE fine-tuned on all three datasets (644 labeled patches, 50 epochs)\n"
+        "  •  LightGBM retrained on new fine-tuned latent space per dataset"
     )
     _txt(sl, body,
          Inches(0.8), Inches(2.8), Inches(11.7), Inches(4.0),
          size_pt=14, color=C_BODY)
 
 
-def slide_finetune_comparison(prs, split: str = "s2v2"):
-    """One slide per dataset+frame: 3-panel comparison (raw | before | after LightGBM)."""
-    cmp_dir = _FT_CMP_DIR
-
+def slide_finetune_all_frames(prs):
+    """One slide per (dataset, frame): 3- or 4-panel figure.
+    vinc_control: raw | before | cls FT  (AE FT pending)
+    ppax/pfak: raw | before | cls FT | full AE FT"""
     for ds, frame, ds_label, frame_label, is_labeled in _FT_FRAMES:
-        img_path = cmp_dir / f"ft_cmp_{ds}_f{frame:04d}_lgbm.png"
+        img_path = _FT_CMP_DIR / f"ft_cmp_{ds}_f{frame:04d}.png"
         sl = _blank(prs)
+        if ds == "vinc_control":
+            panels_note = "Panels: raw | before (dataset1-only) | cls FT | full AE FT  (all vinc-only, no ppax/pfak)"
+        else:
+            panels_note = "Panels: raw | before (dataset1-only) | cls FT | full AE FT"
         _slide_header(
             sl,
-            f"Classifier Fine-Tuning — {ds_label}",
-            f"{frame_label}  •  Left: raw  •  Center: vinc-only LightGBM  •  Right: LightGBM + ppax/pfak labels",
+            f"Before vs After Fine-Tuning — {ds_label}",
+            f"{frame_label}  •  {panels_note}",
         )
         _img_ar(sl, img_path,
-                Inches(0.3), Inches(1.05), Inches(12.73), Inches(5.9),
-                f"[ft_cmp {ds} f{frame:04d}]")
-        caption = (
-            "Green = adhesion (predicted)  •  Purple = No adhesion (predicted)"
-            + ("  •  Colored borders = ground-truth label locations" if is_labeled else "")
-        )
+                Inches(0.15), Inches(1.05), Inches(13.03), Inches(5.9),
+                f"[ft_4panel {ds} f{frame:04d}]")
+        if is_labeled:
+            caption = ("Labeled patches: green=TP  purple=TN  red=FP  orange=FN  "
+                       "•  Unlabeled patches: green=adhesion  purple=No adhesion")
+        else:
+            caption = "green = adhesion (predicted)  •  purple = No adhesion (predicted)"
         _txt(sl, caption,
-             Inches(0.3), Inches(7.05), Inches(12.73), Inches(0.3),
-             size_pt=9, color=C_GREY)
-
-
-def slide_finetune_encoder_ft(prs, split: str = "s2v2"):
-    """One slide per dataset+frame: 3-panel comparison (raw | before | after full AE FT)."""
-    cmp_dir = _FT_CMP_DIR
-
-    for ds, frame, ds_label, frame_label, is_labeled in _FT_FRAMES:
-        img_path = cmp_dir / f"ft_cmp_{ds}_f{frame:04d}_encoder_ft.png"
-        sl = _blank(prs)
-        _slide_header(
-            sl,
-            f"Full AE Fine-Tuning — {ds_label}",
-            f"{frame_label}  •  Left: raw  •  Center: vinc-only encoder + LightGBM  •  Right: fine-tuned AE + LightGBM",
-        )
-        _img_ar(sl, img_path,
-                Inches(0.3), Inches(1.05), Inches(12.73), Inches(5.9),
-                f"[ft_enc {ds} f{frame:04d}]")
-        caption = (
-            "Green = adhesion (predicted)  •  Purple = No adhesion (predicted)"
-            + ("  •  Colored borders = ground-truth label locations" if is_labeled else "")
-        )
-        _txt(sl, caption,
-             Inches(0.3), Inches(7.05), Inches(12.73), Inches(0.3),
+             Inches(0.15), Inches(7.05), Inches(13.03), Inches(0.3),
              size_pt=9, color=C_GREY)
 
 
@@ -1232,8 +1236,7 @@ def main():
 
     # ── Cross-dataset fine-tuning section ───────────────────────────────────
     slide_finetune_title(prs)
-    slide_finetune_comparison(prs, split="s2v2")
-    slide_finetune_encoder_ft(prs, split="s2v2")
+    slide_finetune_all_frames(prs)
 
     prs.save(str(args.out))
     print(f"Saved: {args.out}  ({len(prs.slides)} slides)")
