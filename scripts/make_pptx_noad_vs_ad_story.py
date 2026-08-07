@@ -1189,6 +1189,70 @@ def slide_finetune_all_frames(prs):
              size_pt=9, color=C_GREY)
 
 
+def slide_ft_umap(prs, split: str = "s2v2"):
+    """Two slides: UMAP before/after FT colored by (1) GT labels and (2) predictions."""
+    base = RUN_DIR / f"annabel_vinc_supcon2_{split}" / "fa_cls_zrecon" / "ft_comparison"
+
+    for img_name, subtitle, caption in [
+        ("ft_umap_margaret_labels.png",
+         "Margaret GT labels  (green=adhesion  purple=No adhesion  gray=unlabeled)",
+         "UMAP fitted independently on orig and FT latent spaces. "
+         "Labeled patches (377) use Margaret's 2-class GT. "
+         "Orig AE: 80.1% accuracy on Margaret labels before FT."),
+        ("ft_umap_predictions.png",
+         "LightGBM predictions  (green=adhesion  purple=No adhesion)",
+         "All 14 879 patches colored by classifier prediction. "
+         "Orig: dataset1-only LightGBM. FT: LightGBM retrained on Annabel+Margaret vinc latents."),
+    ]:
+        sl = _blank(prs)
+        _slide_header(
+            sl,
+            "UMAP Before vs After Fine-Tuning — dataset1 / control",
+            f"Left: orig AE  ({split})   Right: FT AE  (Annabel+Margaret vinc, 50 epochs)   •   {subtitle}",
+        )
+        _img_ar(sl, base / img_name,
+                Inches(0.15), Inches(1.1), Inches(13.03), Inches(5.85),
+                f"[{img_name}]")
+        _txt(sl, caption,
+             Inches(0.15), Inches(7.05), Inches(13.03), Inches(0.3),
+             size_pt=9, color=C_GREY)
+
+
+def slide_label_efficiency(prs, split: str = "s2v2"):
+    """Two slides: label-efficiency curve and image-diversity comparison."""
+    base = RUN_DIR / f"annabel_vinc_supcon2_{split}" / "label_efficiency"
+
+    for img_name, subtitle, caption in [
+        ("label_efficiency_curve.png",
+         "How many labels are needed?  (image-held-out vs random-split baseline)",
+         "Left: balanced accuracy on held-out image vs total training labels, "
+         "for 1/2/3 training images (20 random repeats per condition, mean ± 1 SD). "
+         "Right: image-held-out (honest) vs random patch-split (optimistic). "
+         "Gap shows same-image train/test leakage in naive evaluation."),
+        ("label_efficiency_diversity.png",
+         "Image diversity vs label count  (same annotation budget)",
+         "At the same total label budget, using more images (sparse) outperforms "
+         "dense-labeling fewer images.  "
+         "3 images × 75 labels = 225 total → 98.1% ± 0.8% balanced accuracy on held-out image."),
+    ]:
+        img_path = base / img_name
+        if not img_path.exists():
+            print(f"  [skip] {img_name} not found")
+            continue
+        sl = _blank(prs)
+        _slide_header(
+            sl,
+            "Label Efficiency — dataset1 / vinc / control",
+            subtitle,
+        )
+        _img_ar(sl, img_path,
+                Inches(0.15), Inches(1.1), Inches(13.03), Inches(5.85),
+                f"[{img_name}]")
+        _txt(sl, caption,
+             Inches(0.15), Inches(7.05), Inches(13.03), Inches(0.35),
+             size_pt=9, color=C_GREY)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1237,6 +1301,8 @@ def main():
     # ── Cross-dataset fine-tuning section ───────────────────────────────────
     slide_finetune_title(prs)
     slide_finetune_all_frames(prs)
+    slide_ft_umap(prs)
+    slide_label_efficiency(prs)
 
     prs.save(str(args.out))
     print(f"Saved: {args.out}  ({len(prs.slides)} slides)")
