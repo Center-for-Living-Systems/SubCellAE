@@ -1253,6 +1253,29 @@ def slide_label_efficiency(prs, split: str = "s2v2"):
              size_pt=9, color=C_GREY)
 
 
+def slide_annotator_adaptation(prs, split: str = "s2v2"):
+    """One slide: annotator adaptation curve (Annabel+N Margaret vs Margaret-only)."""
+    img_path = RUN_DIR / f"annabel_vinc_supcon2_{split}" / "annotator_adaptation" / "annotator_adaptation_curve.png"
+    if not img_path.exists():
+        print(f"  [skip] annotator_adaptation_curve.png not found")
+        return
+    sl = _blank(prs)
+    _slide_header(
+        sl,
+        "Annotator Adaptation — dataset1 / vinc / control",
+        "Pre-trained AE fixed (Annabel SupCon);  LightGBM retrained with N new annotator labels",
+    )
+    _img_ar(sl, img_path,
+            Inches(0.15), Inches(1.1), Inches(13.03), Inches(5.85),
+            "[annotator_adaptation_curve.png]")
+    _txt(sl,
+         "Blue: Annabel (539) + N Margaret labels — starts at 86.6% with 0 new labels, stays flat (~87% ceiling). "
+         "Green dashed: Margaret labels only — needs ~150 labels to match the Annabel-only baseline. "
+         "Ceiling ~87% suggests representation bottleneck; full AE fine-tuning needed to break through.",
+         Inches(0.15), Inches(7.05), Inches(13.03), Inches(0.35),
+         size_pt=9, color=C_GREY)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1303,6 +1326,7 @@ def main():
     slide_finetune_all_frames(prs)
     slide_ft_umap(prs)
     slide_label_efficiency(prs)
+    slide_annotator_adaptation(prs)
 
     prs.save(str(args.out))
     print(f"Saved: {args.out}  ({len(prs.slides)} slides)")
