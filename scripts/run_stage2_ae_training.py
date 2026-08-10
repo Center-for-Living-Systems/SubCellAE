@@ -159,7 +159,16 @@ def run_split(split: str, epochs: int, lr: float, batch_size: int,
 
 
 def _train_stage2_cls(result_dir: Path, split: str):
-    """Train 4-class LightGBM on train-split adhesion patches; eval on val-split."""
+    """Train 4-class LightGBM on train-split adhesion patches; eval on val-split.
+
+    The patch dataset has 50 frames; Annabel labels cover only frames 0-3.
+    The AE group_split randomly assigns frames to train/val across all 50 frames,
+    which can accidentally put ALL labeled frames into val.  To avoid this we use
+    explicit frame-based train/val assignment for the LightGBM (same as Stage 1):
+      s1v3: frame 0 → train,  frames 1-3 → val
+      s2v2: frames 0-1 → train,  frames 2-3 → val
+      s3v1: frames 0-2 → train,  frame 3 → val
+    """
     import numpy as np
     import pandas as pd
     import joblib
@@ -187,22 +196,36 @@ def _train_stage2_cls(result_dir: Path, split: str):
 
     lat = pd.read_csv(result_dir / "latents.csv")
     z_cols = [c for c in lat.columns if c.startswith("z_")]
-
-    ADHESION_TYPES = set(LABEL_ORDER_4)
-    train_ad = lat[(lat["split"] == "train") &
-                   (lat.get("annotation_label_name", pd.Series([""] * len(lat))).isin(ADHESION_TYPES) if "annotation_label_name" in lat.columns
-                    else lat.get("label", pd.Series([""] * len(lat))).isin(ADHESION_TYPES))].copy()
-    val_ad   = lat[(lat["split"] == "val") &
-                   (lat.get("annotation_label_name", pd.Series([""] * len(lat))).isin(ADHESION_TYPES) if "annotation_label_name" in lat.columns
-                    else lat.get("label", pd.Series([""] * len(lat))).isin(ADHESION_TYPES))].copy()
-
     label_col = "annotation_label_name" if "annotation_label_name" in lat.columns else "label"
-    train_ad = lat[(lat["split"] == "train") & (lat[label_col].isin(ADHESION_TYPES))]
-    val_ad   = lat[(lat["split"] == "val")   & (lat[label_col].isin(ADHESION_TYPES))]
+    ADHESION_TYPES = set(LABEL_ORDER_4)
 
-    print(f"\nStage-2 LightGBM  split={split}")
+    # Fixed frame-based split for the 4-class LightGBM (independent of AE group_split)
+    LABEL_TRAIN_FRAMES = {
+        "s1v3": {"vinc_control_f0000"},
+        "s2v2": {"vinc_control_f0000", "vinc_control_f0001"},
+        "s3v1": {"vinc_control_f0000", "vinc_control_f0001", "vinc_control_f0002"},
+    }
+    LABEL_VAL_FRAMES = {
+        "s1v3": {"vinc_control_f0001", "vinc_control_f0002", "vinc_control_f0003"},
+        "s2v2": {"vinc_control_f0002", "vinc_control_f0003"},
+        "s3v1": {"vinc_control_f0003"},
+    }
+    train_frames = LABEL_TRAIN_FRAMES[split]
+    val_frames   = LABEL_VAL_FRAMES[split]
+
+    all_labeled = lat[lat[label_col].isin(ADHESION_TYPES)]
+    train_ad = all_labeled[all_labeled["group"].isin(train_frames)]
+    val_ad   = all_labeled[all_labeled["group"].isin(val_frames)]
+
+    print(f"\nStage-2 LightGBM  split={split}  (fixed label-frame split)")
+    print(f"  Train frames: {sorted(train_frames)}")
     print(f"  Train: {len(train_ad)} adhesion patches  {train_ad[label_col].value_counts().to_dict()}")
+    print(f"  Val frames: {sorted(val_frames)}")
     print(f"  Val:   {len(val_ad)} adhesion patches  {val_ad[label_col].value_counts().to_dict()}")
+
+    if len(train_ad) == 0:
+        print(f"  WARNING: 0 labeled adhesion patches in train split — skipping.")
+        return
 
     lo4_present = [c for c in LABEL_ORDER_4 if c in set(train_ad[label_col])]
     lo4_to_int  = {c: i for i, c in enumerate(lo4_present)}
