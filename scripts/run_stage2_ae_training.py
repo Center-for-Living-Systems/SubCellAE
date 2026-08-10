@@ -46,6 +46,7 @@ DATA_ROOT  = Path("/net/projects/CLS/lding/data/fa_data_analysis")
 LABEL_DIR  = DATA_ROOT / "labelling"
 RUN_DIR    = DATA_ROOT / "ae_results" / "contrastive_run"
 PATCH_BASE = DATA_ROOT / "ae_results" / "patches"
+PATCH_DIR  = PATCH_BASE / "cio/vinc/control/tiff_patches32_mr10"
 
 LABEL_ORDER_4 = [
     "Nascent Adhesion",
@@ -53,6 +54,9 @@ LABEL_ORDER_4 = [
     "focal adhesion",
     "fibrillar adhesion",
 ]
+
+# Stage 1 split used to gate which patches enter Stage 2 training
+STAGE1_GATE_SPLIT = "s2v2"
 
 # val_split config per split name (fraction assigned to val)
 # group_split=True → splits by image group; val_split is approximate
@@ -63,7 +67,25 @@ SPLIT_VAL_FRAC = {
 }
 
 
-def run_split(split: str, epochs: int, lr: float, batch_size: int):
+def _get_stage1_adhesion_filenames() -> list[str]:
+    """Run Stage-1 (s2v2 gate) on all vinc/control patches; return filenames
+    of patches predicted as adhesion."""
+    import joblib
+    import numpy as np
+    import pandas as pd
+
+    stage1_dir = RUN_DIR / f"annabel_vinc_supcon2_{STAGE1_GATE_SPLIT}"
+    lat = pd.read_csv(stage1_dir / "blind_test" / "vinc_control_latents.csv")
+    z_cols = [c for c in lat.columns if c.startswith("z_")]
+    stage1 = joblib.load(str(stage1_dir / "fa_cls_zrecon" / "model.pkl"))
+    preds = stage1.predict(lat[z_cols].values)
+    adh_fns = lat.loc[preds == 1, "filename"].tolist()
+    print(f"Stage-1 gate ({STAGE1_GATE_SPLIT}): {len(adh_fns)} / {len(lat)} patches predicted as adhesion")
+    return adh_fns
+
+
+def run_split(split: str, epochs: int, lr: float, batch_size: int,
+              adh_filenames: list[str]):
     from subcellae.pipeline.ae_pipeline import AEConfig, run_ae_pipeline
 
     val_frac = SPLIT_VAL_FRAC[split]
@@ -75,6 +97,7 @@ def run_split(split: str, epochs: int, lr: float, batch_size: int):
 
     print(f"\n{'='*65}")
     print(f"Stage-2 AE training  split={split}  val_frac={val_frac}")
+    print(f"Input: {len(adh_filenames)} predicted-adhesion patches (Stage-1 gate: {STAGE1_GATE_SPLIT})")
     print(f"Output: {result_dir}")
     print(f"{'='*65}")
 
@@ -82,13 +105,14 @@ def run_split(split: str, epochs: int, lr: float, batch_size: int):
         result_dir=result_dir,
 
         patch_dirs=[{
-            "path":            str(PATCH_BASE / "cio/vinc/control/tiff_patches32_mr10"),
+            "path":            str(PATCH_DIR),
             "condition":       0,
             "condition_name":  "vinc_control",
             "annotation_file": str(LABEL_DIR / "vinc_control_label_Annabel_20260715_1554.csv"),
             "label_col":       "label",
             "filename_col":    "unique_ID",     # hyphen format matches _patch_name_to_annotation_key
-            "label_order":     LABEL_ORDER_4,   # no-adh patches → unlabeled (-1)
+            "label_order":     LABEL_ORDER_4,   # no-adh patches unlabeled (-1), only 4 adh types
+            "patch_include":   adh_filenames,   # ONLY predicted-adhesion patches enter AE
         }],
 
         # Same architecture as Stage 1
@@ -252,9 +276,12 @@ def main():
     ap.add_argument("--batch-size", type=int, default=128)
     args = ap.parse_args()
 
+    # Get predicted-adhesion filenames from Stage 1 gate once, shared across splits
+    adh_filenames = _get_stage1_adhesion_filenames()
+
     splits = ["s1v3", "s2v2", "s3v1"] if args.all_splits else [args.split]
     for sp in splits:
-        run_split(sp, args.epochs, args.lr, args.batch_size)
+        run_split(sp, args.epochs, args.lr, args.batch_size, adh_filenames)
 
     print("\nAll done.")
 

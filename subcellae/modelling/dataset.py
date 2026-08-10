@@ -116,6 +116,7 @@ class PatchDataset(Dataset):
         label_order_2: list | None = None,
         transform=None,
         hist_map: "np.ndarray | None" = None,
+        patch_include: set | list | None = None,
     ):
         self.root_dir       = root_dir
         self.condition      = condition
@@ -124,6 +125,7 @@ class PatchDataset(Dataset):
         # hist_map: (2, N) array — row 0 = src_q, row 1 = ref_q
         # applied as np.interp(image, src_q, ref_q) at load time
         self._hist_map = hist_map
+        _include_set = {Path(p).name for p in patch_include} if patch_include is not None else None
 
         # ---- helper: load one annotation file → {filename: int} ----
         def _load_annotations(ann_file, col, fname_col, order):
@@ -154,6 +156,7 @@ class PatchDataset(Dataset):
             os.path.join(root_dir, fname)
             for fname in os.listdir(root_dir)
             if fname.lower().endswith(("tif", "tiff"))
+            and (_include_set is None or fname in _include_set)
         ])
 
         self.data                = []

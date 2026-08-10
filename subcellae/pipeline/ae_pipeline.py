@@ -1049,6 +1049,7 @@ def run_ae_pipeline(cfg: AEConfig):
                 **shared_ann_kwargs,
                 transform=_channel_expand,
                 hist_map=hist_map,
+                patch_include=entry.get("patch_include", None),
             )
         path_display = entry.get("path") or entry.get("channel_dirs", "?")
         if cfg.annotation_file and ds.num_classes > 0:
