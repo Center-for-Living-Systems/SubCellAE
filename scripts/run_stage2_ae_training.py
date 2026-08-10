@@ -87,7 +87,7 @@ def run_split(split: str, epochs: int, lr: float, batch_size: int):
             "condition_name":  "vinc_control",
             "annotation_file": str(LABEL_DIR / "vinc_control_label_Annabel_20260715_1554.csv"),
             "label_col":       "label",
-            "filename_col":    "filename",
+            "filename_col":    "unique_ID",     # hyphen format matches _patch_name_to_annotation_key
             "label_order":     LABEL_ORDER_4,   # no-adh patches → unlabeled (-1)
         }],
 
