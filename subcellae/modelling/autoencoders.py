@@ -248,6 +248,7 @@ def plot_reconstruction_progress(model, dataloader, device, epoch, vae_mode=Fals
     idx = torch.randperm(x.size(0))[:n]
     vmax = max(float(torch.quantile(x, 0.95)), float(torch.quantile(recon, 0.95)), 1e-3)
     fig, axes = plt.subplots(2, n, figsize=(n, 2))
+    axes = np.array(axes).reshape(2, n)   # ensure 2-D even when n=1
     for col, i in enumerate(idx):
         axes[0, col].imshow(_to_display(x[i]), cmap="gray", vmin=0, vmax=vmax)
         axes[0, col].axis("off")
@@ -420,7 +421,6 @@ def train_ae(model, train_loader, val_loader, device, epochs, lr,
             fig = plot_reconstruction_progress(model, val_loader, device, epoch + 1, patch_size=patch_size)
             fig.savefig(os.path.join(result_dir, f"ae_recon_ep{epoch+1}.png"))
             plt.close(fig)
-            torch.save(model, os.path.join(result_dir, f"ae_model_ep{epoch+1}.pt"))
 
     _save_loss_curves(train_losses, val_losses, epochs,
                       "AE Total Loss", result_dir, "ae")
@@ -633,7 +633,6 @@ def train_vae(
             plt.tight_layout()
             fig.savefig(os.path.join(result_dir, f"vae_recon_ep{epoch+1}.png"))
             plt.close(fig)
-            torch.save(model, os.path.join(result_dir, f"vae_model_ep{epoch+1}.pt"))
 
     # Save loss curves
     for name, arr in [
@@ -1044,7 +1043,6 @@ def train_semisup_ae(
             fig = plot_reconstruction_progress(model, val_loader, device, epoch + 1)
             fig.savefig(os.path.join(result_dir, f"semisup_recon_ep{epoch+1}.png"))
             plt.close(fig)
-            torch.save(model, os.path.join(result_dir, f"semisup_model_ep{epoch+1}.pt"))
 
     # Restore best weights
     if best_state is not None:
@@ -1223,7 +1221,7 @@ def supcon_loss(
     z: torch.Tensor,
     labels: torch.Tensor,
     temperature: float = 0.5,
-) -> torch.Tensor:
+) -> tuple:
     """
     Hybrid Supervised Contrastive loss (SupCon-style).
 
@@ -1241,6 +1239,13 @@ def supcon_loss(
     ----------
     z      : (2N, D) projection vectors (will be L2-normalised internally)
     labels : (2N,) integer class IDs; -1 marks unlabeled
+
+    Returns
+    -------
+    (loss_labeled, loss_unlabeled) : two scalar tensors
+        loss_labeled   — mean loss over labeled anchors (0 if none in batch)
+        loss_unlabeled — mean loss over unlabeled anchors
+    Apply separate lambda weights in the caller to boost supervised signal.
     """
     N2 = z.size(0)      # = 2 * batch_size
     B  = N2 // 2
@@ -1268,9 +1273,15 @@ def supcon_loss(
     labeled_anchor = (labels >= 0).unsqueeze(1).expand(N2, N2)
     pos_mask = torch.where(labeled_anchor, sup_mask, ss_mask)
 
-    has_pos = pos_mask.any(dim=1)
+    _zero = z.sum() * 0.0  # differentiable zero
+
+    has_pos        = pos_mask.any(dim=1)
+    is_labeled     = labels >= 0                           # (2N,)
+    lab_has_pos    = has_pos & is_labeled
+    unl_has_pos    = has_pos & ~is_labeled
+
     if not has_pos.any():
-        return z.sum() * 0.0   # safe zero that keeps the computation graph
+        return _zero, _zero
 
     # SupCon loss:  L_i = -1/|P_i| * sum_{p in P_i}(sim_ip) + log_denom_i
     log_denom   = torch.logsumexp(sim_no_self, dim=1)               # (2N,)
@@ -1278,7 +1289,10 @@ def supcon_loss(
     pos_sim_sum = (sim * pos_mask.float()).sum(dim=1)                # (2N,)
     loss_per    = -pos_sim_sum / n_pos + log_denom                   # (2N,)
 
-    return loss_per[has_pos].mean()
+    loss_labeled   = loss_per[lab_has_pos].mean() if lab_has_pos.any() else _zero
+    loss_unlabeled = loss_per[unl_has_pos].mean() if unl_has_pos.any() else _zero
+
+    return loss_labeled, loss_unlabeled
 
 
 def contrastive_ae_loss(
@@ -1523,6 +1537,7 @@ def train_contrastive_ae(
 
             vmax = max(float(torch.quantile(view1, 0.95)), float(torch.quantile(recon, 0.95)), 1e-3)
             fig2, axes = plt.subplots(3, _n_show, figsize=(_n_show, 3))
+            axes = np.array(axes).reshape(3, _n_show)   # ensure 2-D when _n_show=1
             for col, i in enumerate(_viz_idx):
                 axes[0, col].imshow(recon[i][0],  cmap="gray", vmin=0, vmax=vmax)
                 axes[0, col].axis("off")
@@ -1537,7 +1552,6 @@ def train_contrastive_ae(
             plt.tight_layout()
             fig2.savefig(os.path.join(result_dir, f"contrastive_views_ep{epoch+1}.png"))
             plt.close(fig2)
-            torch.save(model, os.path.join(result_dir, f"contrastive_model_ep{epoch+1}.pt"))
 
     # Save best checkpoint
     if best_state is not None:
@@ -1595,6 +1609,7 @@ def train_supervised_contrastive_ae(
     lambda_hessian: float        = 0.0,
     log_map_fn                   = None,  # callable(x_tensor) → log-mapped tensor
     log_map_inv_fn               = None,  # callable(x_tensor) → original-space tensor
+    lambda_supcon: float         = -1.0,  # -1 → same as lambda_contrast (backward compat)
 ):
     """
     Training loop for ContrastiveAE with Supervised Contrastive loss (SupCon).
@@ -1614,6 +1629,9 @@ def train_supervised_contrastive_ae(
     temperature  : softmax temperature for the SupCon loss
     """
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    # -1 sentinel → treat labeled anchors identically to unlabeled (backward compat)
+    _lambda_supcon = lambda_supcon if lambda_supcon >= 0.0 else lambda_contrast
 
     def _make_sc_scheduler():
         return _make_scheduler(optimizer, lr_scheduler, epochs,
@@ -1641,8 +1659,9 @@ def train_supervised_contrastive_ae(
     for epoch in range(epochs):
         in_warmup = warmup_epochs > 0 and epoch < warmup_epochs
         eff_lambda_contrast = 0.0 if in_warmup else lambda_contrast
+        eff_lambda_supcon   = 0.0 if in_warmup else _lambda_supcon
         model.train()
-        tl = tr = tc = 0.0
+        tl = tr = tc_lab = tc_unl = 0.0
 
         for batch in train_loader:
             x      = batch[0].to(device)
@@ -1679,18 +1698,20 @@ def train_supervised_contrastive_ae(
                 rl = F.mse_loss(recon, view1, reduction="mean")
             if lambda_hessian > 0.0:
                 rl = rl + lambda_hessian * hessian_l1_loss(recon, view1)
-            cl = supcon_loss(proj_all, labels_all, temperature=temperature)
-            loss = lambda_recon * rl + eff_lambda_contrast * cl
+            cl_lab, cl_unl = supcon_loss(proj_all, labels_all, temperature=temperature)
+            loss = lambda_recon * rl + eff_lambda_supcon * cl_lab + eff_lambda_contrast * cl_unl
 
             optimizer.zero_grad(); loss.backward(); optimizer.step()
-            tl += loss.item(); tr += rl.item(); tc += cl.item()
+            tl += loss.item(); tr += rl.item()
+            tc_lab += cl_lab.item(); tc_unl += cl_unl.item()
 
         n = len(train_loader)
-        tl /= n; tr /= n; tc /= n
-        train_losses.append(tl); train_recon.append(tr); train_contrast.append(tc)
+        tl /= n; tr /= n; tc_lab /= n; tc_unl /= n
+        train_losses.append(tl); train_recon.append(tr)
+        train_contrast.append(tc_lab + tc_unl)
 
         model.eval()
-        vl = vr = vc = vo = 0.0
+        vl = vr = vc_lab = vc_unl = vo = 0.0
         with torch.no_grad():
             for batch in val_loader:
                 x      = batch[0].to(device)
@@ -1725,16 +1746,18 @@ def train_supervised_contrastive_ae(
                     rl = F.mse_loss(recon, view1, reduction="mean")
                 if lambda_hessian > 0.0:
                     rl = rl + lambda_hessian * hessian_l1_loss(recon, view1)
-                cl = supcon_loss(proj_all, labels_all, temperature=temperature)
-                loss = lambda_recon * rl + eff_lambda_contrast * cl
+                cl_lab, cl_unl = supcon_loss(proj_all, labels_all, temperature=temperature)
+                loss = lambda_recon * rl + eff_lambda_supcon * cl_lab + eff_lambda_contrast * cl_unl
 
-                vl += loss.item(); vr += rl.item(); vc += cl.item()
+                vl += loss.item(); vr += rl.item()
+                vc_lab += cl_lab.item(); vc_unl += cl_unl.item()
                 if log_map_inv_fn is not None:
                     vo += F.l1_loss(log_map_inv_fn(recon), log_map_inv_fn(view1)).item()
 
         n = len(val_loader)
-        vl /= n; vr /= n; vc /= n; vo /= n
-        val_losses.append(vl); val_recon.append(vr); val_contrast.append(vc)
+        vl /= n; vr /= n; vc_lab /= n; vc_unl /= n; vo /= n
+        val_losses.append(vl); val_recon.append(vr)
+        val_contrast.append(vc_lab + vc_unl)
 
         # LR scheduler: skip during warmup; reset at transition
         if not in_warmup and scheduler is not None:
@@ -1759,8 +1782,8 @@ def train_supervised_contrastive_ae(
             orig_str = f"  orig_L1={vo:.4f}" if log_map_inv_fn is not None else ""
             print(
                 f"SupCon AE  epoch {epoch+1}/{epochs}{phase_str} | "
-                f"train total={tl:.4f} recon={tr:.4f} contrast={tc:.4f} | "
-                f"val   total={vl:.4f} recon={vr:.4f} contrast={vc:.4f}{orig_str}",
+                f"train total={tl:.4f} recon={tr:.4f} sc={tc_lab:.4f} uc={tc_unl:.4f} | "
+                f"val   total={vl:.4f} recon={vr:.4f} sc={vc_lab:.4f} uc={vc_unl:.4f}{orig_str}",
                 flush=True,
             )
 
@@ -1788,6 +1811,7 @@ def train_supervised_contrastive_ae(
 
             vmax = max(float(torch.quantile(view1, 0.95)), float(torch.quantile(recon, 0.95)), 1e-3)
             fig2, axes = plt.subplots(3, _n_show, figsize=(_n_show, 3))
+            axes = np.array(axes).reshape(3, _n_show)   # ensure 2-D when _n_show=1
             for col, i in enumerate(_viz_idx):
                 axes[0, col].imshow(recon[i][0],  cmap="gray", vmin=0, vmax=vmax)
                 axes[0, col].axis("off")
@@ -1802,7 +1826,6 @@ def train_supervised_contrastive_ae(
             plt.tight_layout()
             fig2.savefig(os.path.join(result_dir, f"supcon_views_ep{epoch+1}.png"))
             plt.close(fig2)
-            torch.save(model, os.path.join(result_dir, f"supcon_model_ep{epoch+1}.pt"))
 
     # Save best checkpoint
     if best_state is not None:

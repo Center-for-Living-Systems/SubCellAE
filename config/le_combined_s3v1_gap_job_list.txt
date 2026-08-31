@@ -1,0 +1,3 @@
+config/le_combined_s3v1/le_comb_s3_n006_npi50_r2.yaml
+config/le_combined_s3v1/le_comb_s3_n007_npi10_r2.yaml
+config/le_combined_s3v1/le_comb_s3_n007_npi25_r0.yaml

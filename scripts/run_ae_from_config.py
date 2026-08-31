@@ -84,6 +84,8 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
             }
             if "frame_dir" in entry:
                 d["frame_dir"] = str(entry["frame_dir"])
+            if "include_frames" in entry:
+                d["include_frames"] = [int(f) for f in entry["include_frames"]]
             patch_dirs.append(d)
 
     # ---- output ----
@@ -127,6 +129,7 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
     noise_prob            = float(_get("model", "noise_prob",            0.05))
     temperature           = float(_get("model", "temperature",           0.5))
     lambda_contrast       = float(_get("model", "lambda_contrast",       0.5))
+    lambda_supcon         = float(_get("model", "lambda_supcon",         -1.0))
     use_flip              = bool(_get("model",  "use_flip",              True))
     _isr                  = _get("model", "intensity_scale_range", [0.8, 1.2])
     intensity_scale_range = tuple(float(v) for v in _isr) if _isr is not None else None
@@ -154,7 +157,8 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
     recon_image_size = int(_get("reconstruction",  "recon_image_size", 1024))
 
     # ---- data loading ----
-    num_workers = int(_get("training", "num_workers", 0))
+    num_workers         = int(_get("training", "num_workers",         0))
+    n_labeled_per_class = int(_get("training", "n_labeled_per_class", 0))
 
     # ---- jitter crop ----
     jitter_crop           = bool(_get("jitter_crop", "enabled",       False))
@@ -212,6 +216,7 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
         noise_prob=noise_prob,
         temperature=temperature,
         lambda_contrast=lambda_contrast,
+        lambda_supcon=lambda_supcon,
         use_flip=use_flip,
         intensity_scale_range=intensity_scale_range,
         epochs=epochs,
@@ -245,6 +250,7 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
         lambda_cls_2=lambda_cls_2,
         hist_map_dir=hist_map_dir,
         num_workers=num_workers,
+        n_labeled_per_class=n_labeled_per_class,
         jitter_crop=jitter_crop,
         jitter_crop_channel=jitter_crop_channel,
         jitter_crop_max_shift=jitter_crop_max_shift,

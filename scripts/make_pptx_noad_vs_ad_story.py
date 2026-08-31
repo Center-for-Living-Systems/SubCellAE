@@ -22,6 +22,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.ticker
 import numpy as np
 import pandas as pd
 from pptx import Presentation
@@ -672,6 +673,117 @@ def slide_prediction_overlays(prs, split: str = "s2v2"):
              size_pt=9, color=C_GREY)
 
 
+def slide_error_patches(prs):
+    """One slide: FP error patches side-by-side for s2v2 (before) and s3v1 (after)."""
+    import tifffile
+
+    def _fp_patches(split):
+        d = RUN_DIR / f"annabel_vinc_supcon2_{split}" / "fa_cls_zrecon" / "patch_sort" / "val" / "gt0pred1"
+        if not d.exists():
+            return []
+        return sorted([(f.name, tifffile.imread(str(f))) for f in d.glob("*.tif*")],
+                      key=lambda x: x[0])
+
+    def _count(split, cat):
+        d = RUN_DIR / f"annabel_vinc_supcon2_{split}" / "fa_cls_zrecon" / "patch_sort" / "val" / cat
+        return len(list(d.glob("*.tif*"))) if d.exists() else 0
+
+    def _patch_fig(fps, title, color):
+        n = max(len(fps), 1)
+        fig, axes = plt.subplots(1, n, figsize=(n * 1.8, 1.9), facecolor="white")
+        if n == 1:
+            axes = [axes]
+        for i, ax in enumerate(axes):
+            if i < len(fps):
+                name, img = fps[i]
+                ax.imshow(img, cmap="gray", interpolation="nearest",
+                          vmin=img.min(), vmax=img.max())
+                # show XY position from filename
+                try:
+                    parts = name.split("_")
+                    xy = [p for p in parts if p.startswith("x") or p.startswith("y")]
+                    ax.set_xlabel("\n".join(xy), fontsize=7)
+                except Exception:
+                    pass
+            else:
+                ax.axis("off")
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for sp in ax.spines.values():
+                sp.set_edgecolor(color)
+                sp.set_linewidth(2)
+        fig.suptitle(title, fontsize=10, fontweight="bold", color=color, y=1.02)
+        fig.tight_layout(pad=0.4)
+        return fig
+
+    s2v2_fps = _fp_patches("s2v2")
+    s3v1_fps = _fp_patches("s3v1")
+
+    sl = _blank(prs)
+    _slide_header(sl,
+                  "False Positive Errors — No-adhesion patches predicted as adhesion",
+                  "Validation set (frame 0003)  •  model comparison: s2v2 (Stage 2 v2) → s3v1 (Stage 3 v1, corrected labels)")
+
+    C_BEFORE = "#B55A00"   # orange/brown for before
+    C_AFTER  = "#1A6B30"   # dark green for after
+
+    # ── Left: s2v2 (before) ─────────────────────────────────────────────────
+    s2v2_s = {c: _count("s2v2", c) for c in ["gt1pred1", "gt0pred0", "gt0pred1", "gt1pred0"]}
+    _txt(sl, "Before — s2v2  (99 labeled adhesion patches)",
+         Inches(0.3), Inches(1.05), Inches(6.2), Inches(0.35),
+         bold=True, size_pt=13, color=C_WARN)
+    stat_s2 = (f"TP={s2v2_s['gt1pred1']}  TN={s2v2_s['gt0pred0']}"
+               f"  FP={s2v2_s['gt0pred1']}  FN={s2v2_s['gt1pred0']}")
+    _txt(sl, stat_s2,
+         Inches(0.3), Inches(1.42), Inches(6.2), Inches(0.3),
+         size_pt=11, color=C_BODY)
+
+    fig_before = _patch_fig(s2v2_fps,
+                             f"{len(s2v2_fps)} FP patch(es) — labeled No-adhesion, predicted adhesion",
+                             C_BEFORE)
+    _add_fig(sl, fig_before,
+             Inches(0.3), Inches(1.78), Inches(6.2), Inches(2.0))
+
+    overlay_s2v2 = RUN_DIR / "annabel_vinc_supcon2_s2v2" / "fa_cls_zrecon" / "overlay_frame0003.png"
+    _txt(sl, "Frame 0003 prediction overlay (s2v2):",
+         Inches(0.3), Inches(3.85), Inches(6.2), Inches(0.28),
+         size_pt=10, color=C_GREY)
+    _img_or_ph(sl, overlay_s2v2,
+               Inches(0.3), Inches(4.13), Inches(6.2), Inches(3.1),
+               "[s2v2 frame 0003 overlay]")
+
+    # ── Right: s3v1 (after) ──────────────────────────────────────────────────
+    s3v1_s = {c: _count("s3v1", c) for c in ["gt1pred1", "gt0pred0", "gt0pred1", "gt1pred0"]}
+    _txt(sl, "After — s3v1  (151 labeled patches, corrected labels)",
+         Inches(6.9), Inches(1.05), Inches(6.1), Inches(0.35),
+         bold=True, size_pt=13, color=C_GOOD)
+    stat_s3 = (f"TP={s3v1_s['gt1pred1']}  TN={s3v1_s['gt0pred0']}"
+               f"  FP={s3v1_s['gt0pred1']}  FN={s3v1_s['gt1pred0']}")
+    _txt(sl, stat_s3,
+         Inches(6.9), Inches(1.42), Inches(6.1), Inches(0.3),
+         size_pt=11, color=C_BODY)
+
+    fig_after = _patch_fig(s3v1_fps,
+                            f"{len(s3v1_fps)} FP patch(es) — same patch persists",
+                            C_AFTER)
+    _add_fig(sl, fig_after,
+             Inches(6.9), Inches(1.78), Inches(6.1), Inches(2.0))
+
+    overlay_s3v1 = RUN_DIR / "annabel_vinc_supcon2_s3v1" / "fa_cls_zrecon" / "overlay_frame0003.png"
+    _txt(sl, "Frame 0003 prediction overlay (s3v1):",
+         Inches(6.9), Inches(3.85), Inches(6.1), Inches(0.28),
+         size_pt=10, color=C_GREY)
+    _img_or_ph(sl, overlay_s3v1,
+               Inches(6.9), Inches(4.13), Inches(6.1), Inches(3.1),
+               "[s3v1 frame 0003 overlay]")
+
+    _txt(sl,
+         "FP errors reduced from 3 → 1 with more training data and corrected labels.  "
+         "The remaining FP (frame 0003, top-left region) persists across both models.",
+         Inches(0.3), Inches(7.18), Inches(12.73), Inches(0.28),
+         size_pt=9, color=C_GREY)
+
+
 def _slide_blind_test_dataset(prs, ds: str, cond: str, label_src: str,
                                n_labeled: int, n_eval: int, extra_note: str = ""):
     sl = _blank(prs)
@@ -1253,6 +1365,300 @@ def slide_label_efficiency(prs, split: str = "s2v2"):
              size_pt=9, color=C_GREY)
 
 
+def slide_le_one_pager(prs):
+    """Single summary slide: goal, approach, and results for the label efficiency experiment."""
+    base      = RUN_DIR / "annabel_vinc_supcon2_s2v2" / "label_efficiency"
+    curve_img = base / "label_efficiency_curve.png"
+
+    sl = _blank(prs)
+    _slide_header(sl,
+                  "Label Efficiency  —  dataset1 / vinc / control",
+                  "How many labeled cells and images are needed to classify adhesion on held-out images?")
+
+    LX = Inches(0.18)
+    LW = Inches(5.55)
+
+    # ── GOAL ──────────────────────────────────────────────────────────────────
+    _txt(sl, "GOAL", LX, Inches(1.10), LW, Inches(0.32),
+         bold=True, size_pt=12, color=C_ACCENT)
+    _txt(sl,
+         "Quantify the annotation budget (cells × images) required to train an "
+         "accurate no-adhesion / adhesion classifier that generalises to images "
+         "not seen during training, using the frozen SupCon AE representation.",
+         LX, Inches(1.44), LW, Inches(0.90), size_pt=10.5)
+
+    # ── APPROACH ──────────────────────────────────────────────────────────────
+    _txt(sl, "APPROACH", LX, Inches(2.44), LW, Inches(0.32),
+         bold=True, size_pt=12, color=C_ACCENT)
+    approach = [
+        ("Model",      "SupCon AE trained on all 14,879 vinc control patches"),
+        ("Labels",     "Annabel's 539 annotations (frames 0–3)  →  subsample K per image"),
+        ("Classifier", "LGBM on frozen latents"),
+        ("Sweep",      "k_train ∈ {1, 2, 3} images;  n_per_img ∈ {10, 25, 50, 75, 100, all}"),
+        ("Eval",       "Image-held-out: test frames excluded from LGBM training  (20 repeats)"),
+    ]
+    for i, (key, val) in enumerate(approach):
+        y = Inches(2.82 + i * 0.50)
+        _txt(sl, key, LX + Inches(0.08), y, Inches(1.15), Inches(0.45),
+             bold=True, size_pt=10, color=C_HEAD)
+        _txt(sl, val, LX + Inches(1.25), y, LW - Inches(1.25), Inches(0.45),
+             size_pt=10)
+
+    # ── KEY RESULTS ───────────────────────────────────────────────────────────
+    _txt(sl, "KEY RESULTS", LX, Inches(5.48), LW, Inches(0.32),
+         bold=True, size_pt=12, color=C_GOOD)
+    results = [
+        "3 images × 75 labels  →  98.1% ± 0.8% balanced accuracy on held-out image",
+        "More images > more labels/image at the same total annotation budget",
+        "1 image × 75 labels already achieves 91.3% ± 4.2%",
+    ]
+    for i, line in enumerate(results):
+        _txt(sl, "▸  " + line,
+             LX + Inches(0.08), Inches(5.86 + i * 0.44), LW - Inches(0.08), Inches(0.42),
+             size_pt=10.5)
+
+    # ── FIGURE (right column) ─────────────────────────────────────────────────
+    _img_or_ph(sl, curve_img,
+               Inches(5.88), Inches(1.05), Inches(7.25), Inches(6.25),
+               "[label_efficiency_curve.png]")
+
+
+def _fig_le_design_comparison():
+    """Two-panel diagram: old (contaminated) vs new (clean) label-efficiency design."""
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.5), facecolor="white")
+
+    COL_TRAIN  = "#4E79A7"   # blue  — train frames
+    COL_TEST   = "#E15759"   # red   — test frames
+    COL_LEAK   = "#F28E2B"   # orange — leak / warning
+    COL_OK     = "#59A14F"   # green — clean
+    COL_GREY   = "#AAAAAA"
+
+    for ax, title, is_old in zip(axes, ["Old design (contaminated)", "New design (clean, in progress)"], [True, False]):
+        ax.set_xlim(0, 10); ax.set_ylim(0, 8)
+        ax.axis("off")
+        ax.set_facecolor("white")
+        ax.set_title(title, fontsize=13, fontweight="bold",
+                     color=COL_LEAK if is_old else COL_OK, pad=8)
+
+        if is_old:
+            # AE training box
+            ae_box = mpatches.FancyBboxPatch((0.3, 5.5), 4.2, 1.5,
+                boxstyle="round,pad=0.1", fc="#EEF4FB", ec=COL_TRAIN, lw=1.5)
+            ax.add_patch(ae_box)
+            ax.text(2.4, 6.7, "SupCon AE training", ha="center", fontsize=10, fontweight="bold", color=COL_TRAIN)
+            ax.text(2.4, 6.15, "SupCon loss: labels from frames 0 & 1\n(frames 2,3 → val only, no gradient)", ha="center", fontsize=8.5, color="#333333")
+
+            # Label efficiency box
+            le_box = mpatches.FancyBboxPatch((0.3, 2.8), 4.2, 2.0,
+                boxstyle="round,pad=0.1", fc="#FFF3F3", ec=COL_TEST, lw=1.5)
+            ax.add_patch(le_box)
+            ax.text(2.4, 4.55, "Label efficiency eval", ha="center", fontsize=10, fontweight="bold", color=COL_TEST)
+            ax.text(2.4, 4.05, "LGBM trains on K labels from train frames", ha="center", fontsize=8.5, color="#333333")
+            ax.text(2.4, 3.55, "Tests on held-out frames", ha="center", fontsize=8.5, color="#333333")
+            ax.text(2.4, 3.05, "Uses all 4 frames (0,1,2,3) as both train & test", ha="center", fontsize=8, color=COL_GREY)
+
+            # Contamination arrow + warning
+            ax.annotate("", xy=(2.4, 4.75), xytext=(2.4, 5.5),
+                        arrowprops=dict(arrowstyle="<->", color=COL_LEAK, lw=2.0))
+            ax.text(3.2, 5.12, "LEAK", ha="center", fontsize=10, fontweight="bold", color=COL_LEAK)
+
+            # Problem statement
+            prob_box = mpatches.FancyBboxPatch((0.3, 0.4), 4.2, 2.1,
+                boxstyle="round,pad=0.1", fc="#FFF8F0", ec=COL_LEAK, lw=1.5)
+            ax.add_patch(prob_box)
+            ax.text(2.4, 2.2, "Problem", ha="center", fontsize=10, fontweight="bold", color=COL_LEAK)
+            ax.text(2.4, 1.75, "When frames 0 or 1 are the test set,", ha="center", fontsize=8.5, color="#333333")
+            ax.text(2.4, 1.3, "the AE already saw their labels during", ha="center", fontsize=8.5, color="#333333")
+            ax.text(2.4, 0.85, "SupCon training → inflated test accuracy", ha="center", fontsize=8.5, color="#333333")
+
+        else:
+            # For each split
+            splits = [
+                ("cfg0: train=[0]   test=[1,2,3]", "k=1 training frame"),
+                ("cfg1: train=[0,1]  test=[2,3]",   "k=2 training frames"),
+                ("cfg2: train=[0,1,2] test=[3]",    "k=3 training frames"),
+            ]
+            for i, (split_label, k_label) in enumerate(splits):
+                y = 6.2 - i * 1.7
+                box = mpatches.FancyBboxPatch((0.3, y - 0.5), 9.2, 1.3,
+                    boxstyle="round,pad=0.1", fc="#F0FFF4", ec=COL_OK, lw=1.2)
+                ax.add_patch(box)
+                ax.text(0.7, y + 0.55, split_label, fontsize=9.5, fontweight="bold", color=COL_TRAIN)
+                ax.text(0.7, y + 0.1,
+                        "Same K labels → SupCon loss  AND  LGBM classifier",
+                        fontsize=8.5, color="#333333")
+                ax.text(0.7, y - 0.3, k_label + "  ×  n_per_img ∈ {10,25,50,75,100,all}  ×  3 repeats = 16 models",
+                        fontsize=7.5, color=COL_GREY)
+
+            # Status
+            stat_box = mpatches.FancyBboxPatch((0.3, 0.3), 9.2, 1.2,
+                boxstyle="round,pad=0.1", fc="#FFFDE7", ec="#FBC02D", lw=1.5)
+            ax.add_patch(stat_box)
+            ax.text(5.0, 1.25, "Status: 48 models complete  ✓   Results on next slide",
+                    ha="center", fontsize=9.5, fontweight="bold", color="#5D4037")
+            ax.text(5.0, 0.75, "Test-frame labels never enter SupCon loss  ✓   "
+                    "SupCon labels = Classifier labels  ✓",
+                    ha="center", fontsize=9, color=COL_OK)
+
+    fig.tight_layout(pad=1.0)
+    return fig
+
+
+def slide_le_design(prs):
+    """Two slides: (1) contamination problem in old design, (2) new clean design + status."""
+
+    # Slide 1 — design comparison diagram
+    sl = _blank(prs)
+    _slide_header(
+        sl,
+        "Label Efficiency — Design Issue & Fix",
+        "Old design: SupCon AE saw test-frame labels during training  →  Contaminated evaluation",
+    )
+    fig = _fig_le_design_comparison()
+    _add_fig(sl, fig, Inches(0.15), Inches(1.05), Inches(13.03), Inches(6.2))
+    _txt(sl,
+         "Old result (left): 98.1% ± 0.8% @ 3 images × 75 labels may be inflated — "
+         "frames 0 & 1 labels shaped the AE representation before being used as test evaluation.  "
+         "New experiment (right): 48 separate SupCon AEs, each trained with exactly the K labels "
+         "the classifier also sees; test-frame labels excluded from SupCon loss entirely.",
+         Inches(0.15), Inches(7.1), Inches(13.03), Inches(0.3),
+         size_pt=8.5, color=C_GREY)
+
+
+def slide_le_clean_results(prs):
+    """Two slides for the clean label-efficiency experiment: curve + summary comparison."""
+    curve_img = REPO_ROOT / "results" / "le_clean_curve.png"
+
+    # ── Slide 1: curve figure ────────────────────────────────────────────────
+    sl = _blank(prs)
+    _slide_header(sl,
+                  "Label Efficiency — Clean Experiment  (vinc / control)",
+                  "48 separate SupCon AEs, each trained with exactly the K labels used by the classifier  |  image-held-out evaluation  |  3 repeats")
+    _img_or_ph(sl, curve_img,
+               Inches(0.15), Inches(1.05), Inches(13.03), Inches(5.9),
+               "[le_clean_curve.png]")
+    _txt(sl,
+         "cfg0: train on frame 0, test on frames 1–3  |  "
+         "cfg1: train on frames 0–1, test on frames 2–3  |  "
+         "cfg2: train on frames 0–2, test on frame 3.  "
+         "Dashed line = 90% threshold.  'all' condition: 1 repeat only (no SD).",
+         Inches(0.15), Inches(7.08), Inches(13.03), Inches(0.32),
+         size_pt=8.5, color=C_GREY)
+
+    # ── Slide 2: key numbers + comparison ───────────────────────────────────
+    sl2 = _blank(prs)
+    _slide_header(sl2,
+                  "Label Efficiency — Clean vs. Contaminated",
+                  "Peak results and pattern comparison")
+
+    # Table-style layout using matplotlib figure
+    fig, ax = plt.subplots(figsize=(13, 5.5), facecolor="white")
+    ax.axis("off")
+
+    # Load summary from CSV if available
+    csv_path = REPO_ROOT / "results" / "le_clean_results.csv"
+    if csv_path.exists():
+        df = pd.read_csv(csv_path)
+        NPI_ORDER = ["10", "25", "50", "75", "100", "all"]
+        summary = (df.groupby(["cfg", "npi", "k_train"])["balanced_acc"]
+                     .agg(mean="mean", std="std").reset_index())
+        summary["mean_pct"] = (summary["mean"] * 100).round(1)
+        summary["std_pct"]  = (summary["std"]  * 100).round(1)
+        summary["npi_order"] = summary["npi"].apply(
+            lambda x: NPI_ORDER.index(x) if x in NPI_ORDER else 99)
+        summary = summary.sort_values(["cfg", "npi_order"])
+
+        colors  = {0: "#4E79A7", 1: "#F28E2B", 2: "#E15759"}
+        markers = {0: "o", 1: "s", 2: "^"}
+        cfg_labels = {
+            0: "cfg0  train=[0]  test=[1,2,3]",
+            1: "cfg1  train=[0,1]  test=[2,3]",
+            2: "cfg2  train=[0,1,2]  test=[3]",
+        }
+        gs = fig.add_gridspec(1, 2, width_ratios=[2, 1], wspace=0.35,
+                              left=0.04, right=0.97, top=0.92, bottom=0.12)
+        ax_curve = fig.add_subplot(gs[0])
+        ax_table = fig.add_subplot(gs[1])
+        ax_table.axis("off")
+
+        for cfg in [0, 1, 2]:
+            s = summary[summary["cfg"] == cfg].sort_values("npi_order")
+            x = np.arange(len(s))
+            ax_curve.errorbar(x, s["mean_pct"], yerr=s["std_pct"].fillna(0),
+                              fmt=f"{markers[cfg]}-", color=colors[cfg],
+                              capsize=3, linewidth=1.8, markersize=7,
+                              label=cfg_labels[cfg])
+        ax_curve.set_xticks(np.arange(len(NPI_ORDER)))
+        ax_curve.set_xticklabels(NPI_ORDER, fontsize=10)
+        ax_curve.set_xlabel("Labels per image (n_per_img)", fontsize=10)
+        ax_curve.set_ylabel("Balanced accuracy (%)", fontsize=10)
+        ax_curve.set_ylim(50, 105)
+        ax_curve.axhline(90, color="#AAAAAA", linestyle="--", linewidth=0.8, label="90% threshold")
+        ax_curve.legend(fontsize=8.5, loc="lower right")
+        ax_curve.set_facecolor("white"); ax_curve.spines[["top", "right"]].set_visible(False)
+        ax_curve.set_title("Clean experiment  (3 repeats)", fontsize=11, fontweight="bold")
+
+        # Comparison table
+        rows = [
+            ["Condition",                  "Old (contam.)", "New (clean)"],
+            ["1 img × 75 labels",          "91.3% ± 4.2%", f"{summary[(summary.cfg==0)&(summary.npi=='75')]['mean_pct'].values[0]:.1f}% ± {summary[(summary.cfg==0)&(summary.npi=='75')]['std_pct'].values[0]:.1f}%"],
+            ["2 img × 75 labels",          "94.4% ± 3.8%", f"{summary[(summary.cfg==1)&(summary.npi=='75')]['mean_pct'].values[0]:.1f}% ± {summary[(summary.cfg==1)&(summary.npi=='75')]['std_pct'].values[0]:.1f}%"],
+            ["3 img × 75 labels",          "98.1% ± 0.8%", f"{summary[(summary.cfg==2)&(summary.npi=='75')]['mean_pct'].values[0]:.1f}% ± {summary[(summary.cfg==2)&(summary.npi=='75')]['std_pct'].values[0]:.1f}%"],
+            ["3 img × 50 labels (clean peak)", "—",        f"{summary[(summary.cfg==2)&(summary.npi=='50')]['mean_pct'].values[0]:.1f}% ± {summary[(summary.cfg==2)&(summary.npi=='50')]['std_pct'].values[0]:.1f}%"],
+        ]
+        col_widths = [0.50, 0.25, 0.25]
+        for ri, row in enumerate(rows):
+            y = 0.90 - ri * 0.17
+            x_pos = 0.0
+            for ci, (cell, cw) in enumerate(zip(row, col_widths)):
+                bold = ri == 0
+                color = "#1A1A2E" if ri == 0 else (
+                    "#1A6B30" if (ri == len(rows)-1 and ci == 2) else "#1A1A1A")
+                ax_table.text(x_pos, y, cell, fontsize=9.5 if ri > 0 else 10,
+                              fontweight="bold" if bold else "normal",
+                              color=color, va="top", transform=ax_table.transAxes)
+                x_pos += cw
+            if ri == 0:
+                ax_table.plot([0, 1], [y - 0.02, y - 0.02],
+                              color="#CCCCCC", linewidth=0.8,
+                              transform=ax_table.transAxes)
+        ax_table.set_title("Key numbers", fontsize=11, fontweight="bold")
+        ax_table.set_xlim(0, 1); ax_table.set_ylim(0, 1)
+    else:
+        ax.text(0.5, 0.5, "[le_clean_results.csv not found]",
+                ha="center", va="center", fontsize=12, color="#AAAAAA",
+                transform=ax.transAxes)
+
+    _add_fig(sl2, fig, Inches(0.15), Inches(1.05), Inches(13.03), Inches(6.0))
+    _txt(sl2,
+         "Old (contaminated): single SupCon AE trained with val_split=0.5; frames 0&1 labels shaped both AE and eval.  "
+         "New (clean): each LGBM evaluation uses its own SupCon AE trained on exactly the same K labels.  "
+         "Peak clean result: 3 images × 50 labels → 98.2% ± 1.2%.  "
+         "Pattern consistent: contamination did not dramatically inflate the reported numbers.",
+         Inches(0.15), Inches(7.08), Inches(13.03), Inches(0.32),
+         size_pt=8.5, color=C_GREY)
+
+
+def slide_le_umap_grid(prs):
+    """One slide: 3×6 UMAP grid for the clean label-efficiency experiment."""
+    grid_img = REPO_ROOT / "results" / "le_clean_umap_grid.png"
+    sl = _blank(prs)
+    _slide_header(sl,
+                  "Label Efficiency — Latent Space (UMAP)  per condition  (repeat=0)",
+                  "Each panel is a separately trained SupCon AE  |  dark = train labels  |  light = test labels (Annabel)  |  gray = unlabeled")
+    _img_or_ph(sl, grid_img,
+               Inches(0.1), Inches(1.0), Inches(13.13), Inches(6.3),
+               "[le_clean_umap_grid.png — run compute_le_umap_grid.py to generate]")
+    _txt(sl,
+         "Rows: cfg0 (1 train image), cfg1 (2 train images), cfg2 (3 train images).  "
+         "Columns: n_per_img ∈ {10, 25, 50, 75, 100, all}.  "
+         "Each UMAP is computed independently on that model's 12-dim latent space "
+         "(2,000 background pts subsampled).  "
+         "Dark blue/red = the K labels used by both SupCon loss and the LGBM classifier.",
+         Inches(0.15), Inches(7.1), Inches(13.03), Inches(0.3),
+         size_pt=8.5, color=C_GREY)
+
+
 def slide_annotator_adaptation(prs, split: str = "s2v2"):
     """One slide: annotator adaptation curve (Annabel+N Margaret vs Margaret-only)."""
     img_path = RUN_DIR / f"annabel_vinc_supcon2_{split}" / "annotator_adaptation" / "annotator_adaptation_curve.png"
@@ -1277,6 +1683,406 @@ def slide_annotator_adaptation(prs, split: str = "s2v2"):
 
 
 # ---------------------------------------------------------------------------
+# SupCon label-bug + corrected comparison slides
+# ---------------------------------------------------------------------------
+
+def slide_supcon_label_bug(prs):
+    """Explain the filename_col bug: original Stage 1 SupCon had 0 matched labels."""
+    sl = _blank(prs)
+    _slide_header(sl,
+        "Discovery: Stage 1 SupCon was effectively ConAE (0 labels matched)",
+        "filename_col mismatch — corrected runs show labels genuinely reshape the latent space")
+
+    top = Inches(1.1)
+    col1 = Inches(0.5)
+    col2 = Inches(6.8)
+    w    = Inches(6.0)
+
+    # Left column: the bug
+    _txt(sl, "The Bug", col1, top, w, Inches(0.3), bold=True, size_pt=14, color=C_WARN)
+    bug_text = (
+        "PatchDataset converts patch filenames to hyphen format before annotation lookup:\n"
+        "   control_f0000x...ps32.tif  →  control-f0000x...ps32.tif\n\n"
+        "Original Stage 1 YAML used  filename_col: \"filename\"  (underscore format).\n"
+        "The annotation dict keys were underscore; lookups used hyphen → 0 matches.\n\n"
+        "Result: all 3 original SupCon runs (s1v3 / s2v2 / s3v1) had 0 labeled patches\n"
+        "and trained as pure ConAE (self-augmentation only)."
+    )
+    _txt(sl, bug_text, col1, top + Inches(0.35), w, Inches(2.2), size_pt=11, color=C_BODY)
+
+    # Fix
+    _txt(sl, "The Fix", col1, top + Inches(2.65), w, Inches(0.3),
+         bold=True, size_pt=14, color=C_GOOD)
+    fix_text = (
+        "Change  filename_col: \"unique_ID\"  (hyphen format) to match the lookup key.\n\n"
+        "Corrected runs: 539 / 14879 patches labeled  (342 No adhesion + 197 adhesion)\n"
+        "Combined runs (ctrl+ycomp): 539 / 27637 patches labeled\n\n"
+        "For the first time, the supervised contrastive loss actually uses the labels."
+    )
+    _txt(sl, fix_text, col1, top + Inches(3.0), w, Inches(1.8), size_pt=11, color=C_BODY)
+
+    # Right column: annotated counts table
+    _txt(sl, "Label counts per run", col2, top, w, Inches(0.3),
+         bold=True, size_pt=14, color=C_ACCENT)
+    rows = [
+        ("Run",                          "Labeled", "Status"),
+        ("SupCon s1v3 (original)",       "0",       "❌ ConAE"),
+        ("SupCon s2v2 (original)",       "0",       "❌ ConAE"),
+        ("SupCon s3v1 (original)",       "0",       "❌ ConAE"),
+        ("ConAE ctrl (baseline)",        "—",       "✓ by design"),
+        ("SupCon corrected s1v3",        "539",     "✓ fixed"),
+        ("SupCon corrected s2v2",        "539",     "✓ fixed"),
+        ("SupCon corrected s3v1",        "539",     "✓ fixed"),
+        ("SupCon combined s1v3/s2v2/s3v1", "539",  "✓ fixed"),
+        ("ConAE combined (baseline)",    "—",       "✓ by design"),
+    ]
+    for k, (run, n, status) in enumerate(rows):
+        y = top + Inches(0.35) + k * Inches(0.37)
+        bold = (k == 0)
+        col_s = C_WARN if "❌" in status else (C_GOOD if "✓" in status else C_BODY)
+        _txt(sl, run,    col2,              y, Inches(3.5), Inches(0.35), bold=bold, size_pt=10, color=C_BODY)
+        _txt(sl, n,      col2 + Inches(3.5), y, Inches(0.8), Inches(0.35), bold=bold, size_pt=10, color=C_BODY, align=PP_ALIGN.CENTER)
+        _txt(sl, status, col2 + Inches(4.3), y, Inches(1.5), Inches(0.35), bold=bold, size_pt=10, color=col_s)
+
+
+def slide_supcon_corrected_umap(prs):
+    """2×4 comparison UMAP: ConAE vs corrected SupCon, control-only vs combined."""
+    sl = _blank(prs)
+    _slide_header(sl,
+        "Corrected SupCon genuinely reshapes latent space — ConAE vs SupCon comparison",
+        "Blue=No adhesion  ·  Orange=Adhesion  ·  Grey=unlabeled  ·  UMAP of z_latent (12-d)")
+
+    img_path = DATA_ROOT / "ae_results" / "supcon_comparison_umap.png"
+    _img_or_ph(sl, img_path,
+               Inches(0.2), Inches(1.05), Inches(12.9), Inches(6.2),
+               "[supcon_comparison_umap.png — run make_pptx_noad_vs_ad_story.py after training]")
+
+    _txt(sl,
+         "Row 1 (control-only, 14879 patches): corrected SupCon clearly separates no-adh (blue) from adh (orange). "
+         "ConAE shows no class structure. "
+         "Row 2 (control+ycomp, 27637 patches): adding ycomp breaks the horseshoe; "
+         "SupCon combined still shows label-driven clustering.",
+         Inches(0.3), Inches(7.1), Inches(12.7), Inches(0.3),
+         size_pt=9, color=C_GREY)
+
+
+# ---------------------------------------------------------------------------
+# Fine-tuning efficiency slides (ycomp / pfak)
+# ---------------------------------------------------------------------------
+
+def _load_ft_csv(run_key: str) -> pd.DataFrame | None:
+    p = RUN_DIR / run_key / "results.csv"
+    if p.exists():
+        return pd.read_csv(p)
+    return None
+
+
+def _ft_eff_panel(ax, curves: list[dict], x_col: str = "frac"):
+    """Draw efficiency curves on ax.
+
+    Each dict: {"df": DataFrame, "label": str, "color": str, "ls": str}
+    """
+    for c in curves:
+        df = c["df"].sort_values(x_col)
+        xs = (df[x_col] * 100).astype(int)
+        ax.plot(xs, df["bal_acc"], marker="o", color=c["color"],
+                linestyle=c.get("ls", "-"), linewidth=1.8, markersize=6,
+                label=c["label"])
+    ax.set_xlabel("% target labels used", fontsize=9)
+    ax.set_ylabel("Balanced Accuracy", fontsize=9)
+    ax.set_ylim(0.55, 1.03)
+    ax.set_yticks([0.6, 0.7, 0.8, 0.9, 1.0])
+    ax.yaxis.set_major_formatter(
+        matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:.0%}"))
+    ax.grid(True, alpha=0.25)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(fontsize=8, loc="lower right")
+
+
+def slide_ft_efficiency_ycomp(prs):
+    """Two slides: ycomp label-efficiency — target-only and ctrl+target."""
+    COLORS = {
+        "corrected_cls":  "#4E79A7",
+        "combined_cls":   "#F28E2B",
+        "corrected_ft":   "#1B6B9A",
+        "combined_ft":    "#D4562B",
+        "ctrl_plus_cls":  "#59A14F",
+        "ctrl_plus_ft":   "#B07AA1",
+    }
+
+    df_co_corr = _load_ft_csv("ft_ycomp_corrected_s3v1_cls_only")
+    df_co_comb = _load_ft_csv("ft_ycomp_combined_s3v1_cls_only")
+    df_ft_corr = _load_ft_csv("ft_ycomp_corrected_s3v1_full_ft")
+    df_ft_comb = _load_ft_csv("ft_ycomp_combined_s3v1_full_ft")
+    df_cc_cls  = _load_ft_csv("ft_ycomp_combined_s3v1_cls_ctrl_plus")
+    df_cc_ft   = _load_ft_csv("ft_ycomp_combined_s3v1_full_ft_ctrl_plus")
+
+    # ── Slide 1: target-only ──────────────────────────────────────────────────
+    sl = _blank(prs)
+    _slide_header(sl,
+                  "Fine-tuning Efficiency — dataset1 ycomp  (target-only labels)",
+                  "base models: corrected_s3v1 (ctrl-only SupCon) vs combined_s3v1 (ctrl+ycomp SupCon)  |  "
+                  "fixed 80/20 split, seed=42  |  GBM: n_est=200, depth=4")
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), facecolor="white")
+    fig.subplots_adjust(left=0.07, right=0.97, top=0.88, bottom=0.14, wspace=0.35)
+
+    # Left: cls_only
+    ax = axes[0]
+    curves = []
+    if df_co_corr is not None:
+        curves.append({"df": df_co_corr, "label": "cls_only / corrected_s3v1",
+                       "color": COLORS["corrected_cls"], "ls": "-"})
+    if df_co_comb is not None:
+        curves.append({"df": df_co_comb, "label": "cls_only / combined_s3v1",
+                       "color": COLORS["combined_cls"], "ls": "-"})
+    _ft_eff_panel(ax, curves)
+    ax.set_title("Classifier-only (encoder frozen)", fontsize=10, fontweight="bold")
+
+    # Right: full_ft
+    ax = axes[1]
+    curves = []
+    if df_ft_corr is not None:
+        curves.append({"df": df_ft_corr, "label": "full_ft / corrected_s3v1",
+                       "color": COLORS["corrected_ft"], "ls": "--"})
+    if df_ft_comb is not None:
+        curves.append({"df": df_ft_comb, "label": "full_ft / combined_s3v1",
+                       "color": COLORS["combined_ft"], "ls": "--"})
+    _ft_eff_panel(ax, curves)
+    ax.set_title("Full fine-tuning (SupCon AE + GBM)", fontsize=10, fontweight="bold")
+
+    _add_fig(sl, fig, Inches(0.15), Inches(1.05), Inches(13.03), Inches(5.9))
+
+    bacc_vals = []
+    for df in [df_co_corr, df_co_comb, df_ft_corr, df_ft_comb]:
+        if df is not None:
+            bacc_vals.append(df["bal_acc"].max())
+    best = f"{max(bacc_vals):.1%}" if bacc_vals else "n/a"
+    _txt(sl,
+         f"corrected_s3v1 (ctrl-only base): cls_only peaks at 86.3%  |  "
+         f"combined_s3v1 (ctrl+ycomp base): cls_only peaks at 87.9%  |  "
+         f"full_ft combined_s3v1 peaks at 90.3% (25% labels)  |  Best: {best}",
+         Inches(0.15), Inches(7.05), Inches(13.03), Inches(0.35),
+         size_pt=9, color=C_GREY)
+
+    # ── Slide 2: ctrl+target ──────────────────────────────────────────────────
+    sl2 = _blank(prs)
+    _slide_header(sl2,
+                  "Fine-tuning Efficiency — dataset1 ycomp  (ctrl labels + X% target labels)",
+                  "0% = GBM trained on 539 vinc/control labels only, tested on ycomp  |  base=combined_s3v1")
+
+    fig2, axes2 = plt.subplots(1, 2, figsize=(12, 5), facecolor="white")
+    fig2.subplots_adjust(left=0.07, right=0.97, top=0.88, bottom=0.14, wspace=0.35)
+
+    ax = axes2[0]
+    if df_cc_cls is not None:
+        _ft_eff_panel(ax, [{"df": df_cc_cls, "label": "cls_ctrl_plus / combined",
+                             "color": COLORS["ctrl_plus_cls"], "ls": "-"}])
+    ax.set_title("Classifier-only + ctrl labels (frozen)", fontsize=10, fontweight="bold")
+
+    ax = axes2[1]
+    if df_cc_ft is not None:
+        _ft_eff_panel(ax, [{"df": df_cc_ft, "label": "full_ft_ctrl_plus / combined",
+                             "color": COLORS["ctrl_plus_ft"], "ls": "--"}])
+    ax.set_title("Full fine-tuning + ctrl labels", fontsize=10, fontweight="bold")
+
+    _add_fig(sl2, fig2, Inches(0.15), Inches(1.05), Inches(13.03), Inches(5.9))
+    _txt(sl2,
+         "0% baseline (ctrl labels only): cls=92.4%  full_ft=91.4%  |  "
+         "Combined model already generalises well to ycomp — adding ycomp labels provides little gain.  |  "
+         "cls_ctrl_plus is flat ~90-92%;  full_ft_ctrl_plus also flat ~88-91%.  ",
+         Inches(0.15), Inches(7.05), Inches(13.03), Inches(0.35),
+         size_pt=9, color=C_GREY)
+
+
+def slide_ft_efficiency_pfak(prs):
+    """Two slides: pfak label-efficiency — target-only and ctrl+target."""
+    COLORS = {
+        "cls_only":      "#4E79A7",
+        "full_ft":       "#E15759",
+        "ctrl_plus_cls": "#59A14F",
+        "ctrl_plus_ft":  "#B07AA1",
+    }
+
+    df_co = _load_ft_csv("ft_pfak_combined_s3v1_cls_only")
+    df_ft = _load_ft_csv("ft_pfak_combined_s3v1_full_ft")
+    df_cc = _load_ft_csv("ft_pfak_combined_s3v1_cls_ctrl_plus")
+    df_cf = _load_ft_csv("ft_pfak_combined_s3v1_full_ft_ctrl_plus")
+
+    # ── Slide 1: target-only ──────────────────────────────────────────────────
+    sl = _blank(prs)
+    _slide_header(sl,
+                  "Fine-tuning Efficiency — dataset2 pfak  (target-only labels)",
+                  "base=combined_s3v1  |  211 labeled pfak/control patches  |  fixed 80/20 split, seed=42")
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), facecolor="white")
+    fig.subplots_adjust(left=0.07, right=0.97, top=0.88, bottom=0.14, wspace=0.35)
+
+    ax = axes[0]
+    if df_co is not None:
+        _ft_eff_panel(ax, [{"df": df_co, "label": "cls_only / combined_s3v1",
+                             "color": COLORS["cls_only"], "ls": "-"}])
+    ax.set_title("Classifier-only (encoder frozen)", fontsize=10, fontweight="bold")
+
+    ax = axes[1]
+    if df_ft is not None:
+        _ft_eff_panel(ax, [{"df": df_ft, "label": "full_ft / combined_s3v1",
+                             "color": COLORS["full_ft"], "ls": "--"}])
+    ax.set_title("Full fine-tuning (SupCon AE + GBM)", fontsize=10, fontweight="bold")
+
+    _add_fig(sl, fig, Inches(0.15), Inches(1.05), Inches(13.03), Inches(5.9))
+    _txt(sl,
+         "cls_only peaks at 94.2% (75% labels, n=126)  |  "
+         "full_ft peaks at 92.6% (25% or 75% labels, n=42/126)  |  "
+         "pfak is a genuinely new domain — cls_only needs ~25% labels to match baseline;  "
+         "full_ft gains quickly with small label counts.",
+         Inches(0.15), Inches(7.05), Inches(13.03), Inches(0.35),
+         size_pt=9, color=C_GREY)
+
+    # ── Slide 2: ctrl+target ──────────────────────────────────────────────────
+    sl2 = _blank(prs)
+    _slide_header(sl2,
+                  "Fine-tuning Efficiency — dataset2 pfak  (ctrl labels + X% target labels)",
+                  "0% = GBM trained on 539 vinc/control labels only, tested on pfak  |  base=combined_s3v1")
+
+    fig2, axes2 = plt.subplots(1, 2, figsize=(12, 5), facecolor="white")
+    fig2.subplots_adjust(left=0.07, right=0.97, top=0.88, bottom=0.14, wspace=0.35)
+
+    ax = axes2[0]
+    if df_cc is not None:
+        _ft_eff_panel(ax, [{"df": df_cc, "label": "cls_ctrl_plus / combined",
+                             "color": COLORS["ctrl_plus_cls"], "ls": "-"}])
+    ax.set_title("Classifier-only + ctrl labels (frozen)", fontsize=10, fontweight="bold")
+
+    ax = axes2[1]
+    if df_cf is not None:
+        _ft_eff_panel(ax, [{"df": df_cf, "label": "full_ft_ctrl_plus / combined",
+                             "color": COLORS["ctrl_plus_ft"], "ls": "--"}])
+    ax.set_title("Full fine-tuning + ctrl labels", fontsize=10, fontweight="bold")
+
+    _add_fig(sl2, fig2, Inches(0.15), Inches(1.05), Inches(13.03), Inches(5.9))
+    _txt(sl2,
+         "0% baseline (ctrl labels only): cls=87.5%  full_ft=85.9%  |  "
+         "pfak is a new domain: ctrl-only GBM already reaches 87.5%  |  "
+         "cls_ctrl_plus improves slowly, reaching 91.7% at 75%  |  "
+         "full_ft_ctrl_plus shows modest improvement, similar ceiling ~90%",
+         Inches(0.15), Inches(7.05), Inches(13.03), Inches(0.35),
+         size_pt=9, color=C_GREY)
+
+
+# ---------------------------------------------------------------------------
+# Summary: efficiency + generalization one-pager
+# ---------------------------------------------------------------------------
+
+def slide_efficiency_generalization_summary(prs):
+    """One-page summary: label efficiency curves + cross-dataset generalization bars."""
+
+    # ── collect blind-test zero-shot accuracy (2-class, s3v1 zrecon) ─────────
+    def _blind_acc(ds, cond):
+        p = RUN_DIR / "annabel_vinc_supcon2_s3v1" / "blind_test" / f"{ds}_{cond}_zrecon" / "metrics.csv"
+        if not p.exists():
+            return None, None
+        df = pd.read_csv(p)
+        return float(df["accuracy"].iloc[0]) * 100, float(df["macro_f1"].iloc[0]) * 100
+
+    zs_acc = {}  # dataset label → (acc, f1)
+    zs_acc["vinc/ctrl\n(in-domain)"]  = _blind_acc("vinc", "control")
+    zs_acc["vinc/ycomp\n(zero-shot)"] = _blind_acc("vinc", "ycomp")
+    zs_acc["ppax/ctrl\n(zero-shot)"]  = _blind_acc("ppax", "control")
+    zs_acc["pfak/ctrl\n(zero-shot)"]  = _blind_acc("pfak", "control")
+
+    # ── fine-tuning results at every fraction ─────────────────────────────────
+    FT_RUNS = {
+        "ycomp  target only":  RUN_DIR / "ft_ycomp_combined_s3v1_full_ft"  / "results.csv",
+        "ycomp  ctrl+target":  RUN_DIR / "ft_ycomp_combined_s3v1_full_ft_ctrl_plus" / "results.csv",
+        "pfak   target only":  RUN_DIR / "ft_pfak_combined_s3v1_full_ft"   / "results.csv",
+        "pfak   ctrl+target":  RUN_DIR / "ft_pfak_combined_s3v1_full_ft_ctrl_plus"  / "results.csv",
+    }
+    FT_COLORS = {
+        "ycomp  target only": "#1565C0",
+        "ycomp  ctrl+target": "#64B5F6",
+        "pfak   target only": "#E65100",
+        "pfak   ctrl+target": "#FFAB40",
+    }
+    ft_curves = {}
+    for label, csv in FT_RUNS.items():
+        if not csv.exists():
+            continue
+        df = pd.read_csv(csv)
+        fracs = sorted(df["frac"].unique())
+        means = [df[df["frac"] == f]["bal_acc"].mean() * 100 for f in fracs]
+        ft_curves[label] = (fracs, means)
+
+    # ── build figure ──────────────────────────────────────────────────────────
+    fig, (ax_gen, ax_eff) = plt.subplots(
+        1, 2, figsize=(13.0, 5.2),
+        gridspec_kw={"width_ratios": [1, 1.3]},
+        facecolor="white",
+    )
+
+    # ── Panel 1: generalization bar chart ─────────────────────────────────────
+    ds_labels = list(zs_acc.keys())
+    accs  = [zs_acc[k][0] if zs_acc[k][0] is not None else 0 for k in ds_labels]
+    f1s   = [zs_acc[k][1] if zs_acc[k][1] is not None else 0 for k in ds_labels]
+
+    x = np.arange(len(ds_labels))
+    w = 0.32
+    b1 = ax_gen.bar(x - w / 2, accs, w, label="Accuracy",  color="#1565C0", alpha=0.85)
+    b2 = ax_gen.bar(x + w / 2, f1s,  w, label="Macro F1",  color="#42A5F5", alpha=0.85)
+    for bar in list(b1) + list(b2):
+        v = bar.get_height()
+        if v > 2:
+            ax_gen.text(bar.get_x() + bar.get_width() / 2, v + 0.8,
+                        f"{v:.0f}", ha="center", va="bottom", fontsize=8)
+
+    ax_gen.axhline(50, color="#CCCCCC", linestyle="--", linewidth=0.8)
+    ax_gen.set_xticks(x)
+    ax_gen.set_xticklabels(ds_labels, fontsize=9)
+    ax_gen.set_ylim(0, 115)
+    ax_gen.set_ylabel("% (no fine-tuning)", fontsize=10)
+    ax_gen.set_title("Zero-shot generalization\n(s3v1 model, Margaret labels)",
+                     fontsize=11, fontweight="bold")
+    ax_gen.legend(fontsize=9, loc="lower right")
+    ax_gen.spines[["top", "right"]].set_visible(False)
+    ax_gen.set_facecolor("white")
+
+    # ── Panel 2: label efficiency curves ──────────────────────────────────────
+    for label, (fracs, means) in ft_curves.items():
+        # include 0% zero-shot anchor for cross-dataset runs
+        ds = "ycomp" if "ycomp" in label else "pfak"
+        zs_key = [k for k in ds_labels if ds in k.lower()][0]
+        zs_val = zs_acc[zs_key][0]
+
+        x_pts = [0.0] + fracs if (zs_val and "ctrl+target" not in label) else fracs
+        y_pts = [zs_val] + means if (zs_val and "ctrl+target" not in label) else means
+        style = "-o" if "target only" in label else "--s"
+        ax_eff.plot([f * 100 for f in x_pts], y_pts,
+                    style, color=FT_COLORS[label], linewidth=1.8,
+                    markersize=6, label=label)
+
+    ax_eff.axhline(50, color="#CCCCCC", linestyle=":", linewidth=0.8)
+    ax_eff.set_xlabel("% target labels used for fine-tuning", fontsize=10)
+    ax_eff.set_ylabel("Balanced accuracy (%)", fontsize=10)
+    ax_eff.set_title("Label efficiency — full AE fine-tuning\n(ycomp & pfak, full_ft)",
+                     fontsize=11, fontweight="bold")
+    ax_eff.set_ylim(50, 100)
+    ax_eff.set_xticks([0, 10, 25, 50, 75])
+    ax_eff.legend(fontsize=8.5, loc="lower right")
+    ax_eff.spines[["top", "right"]].set_visible(False)
+    ax_eff.set_facecolor("white")
+
+    fig.tight_layout(pad=1.5)
+
+    sl = _blank(prs)
+    _slide_header(sl,
+                  "Summary — Efficiency & Cross-Dataset Generalization",
+                  "Left: zero-shot accuracy on all datasets (no fine-tuning)  ·  "
+                  "Right: balanced accuracy vs labeled fraction after full AE fine-tuning")
+    _add_fig(sl, fig,
+             Inches(0.15), Inches(1.0), Inches(13.03), Inches(6.25))
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1298,6 +2104,7 @@ def main():
     slide_indomain_val(prs)
     slide_umap_annotation_vs_pred(prs)
     slide_prediction_overlays(prs, split="s2v2")
+    slide_error_patches(prs)
     slide_crossds_overlays(prs, split="s2v2")
 
     # Blind test per dataset
@@ -1325,8 +2132,23 @@ def main():
     slide_finetune_title(prs)
     slide_finetune_all_frames(prs)
     slide_ft_umap(prs)
+    slide_le_one_pager(prs)
     slide_label_efficiency(prs)
+    slide_le_design(prs)
+    slide_le_clean_results(prs)
+    slide_le_umap_grid(prs)
     slide_annotator_adaptation(prs)
+
+    # ── SupCon label-bug discovery & corrected comparison ───────────────────
+    slide_supcon_label_bug(prs)
+    slide_supcon_corrected_umap(prs)
+
+    # ── Fine-tuning efficiency (ycomp + pfak) ───────────────────────────────
+    slide_ft_efficiency_ycomp(prs)
+    slide_ft_efficiency_pfak(prs)
+
+    # ── One-page summary ─────────────────────────────────────────────────────
+    slide_efficiency_generalization_summary(prs)
 
     prs.save(str(args.out))
     print(f"Saved: {args.out}  ({len(prs.slides)} slides)")

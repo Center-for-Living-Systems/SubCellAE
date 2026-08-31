@@ -43,7 +43,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import ConcatDataset, DataLoader, Subset, random_split
 
-from subcellae.modelling.dataset import PatchDataset, MultiChannelPatchDataset, JitterCropDataset, EnlargedCropDataset, MultiChannelEnlargedCropDataset
+from subcellae.modelling.dataset import PatchDataset, MultiChannelPatchDataset, JitterCropDataset, EnlargedCropDataset, MultiChannelEnlargedCropDataset, LabeledAwareBatchSampler
 from subcellae.modelling.autoencoders import (
     AE, train_ae,
     VAE32, train_vae,
@@ -193,6 +193,7 @@ class AEConfig:
     noise_prob: float              = 0.05
     temperature: float             = 0.5
     lambda_contrast: float         = 0.5
+    lambda_supcon: float           = -1.0  # -1 → same as lambda_contrast; >0 boosts labeled-anchor loss
     use_flip: bool                 = True         # random H/V flips in augmentation
     intensity_scale_range: tuple   = (0.8, 1.2)  # (low, high) intensity multiplier
 
@@ -200,6 +201,7 @@ class AEConfig:
     epochs: int         = 200
     lr: float           = 1e-3
     batch_size: int     = 128
+    n_labeled_per_class: int = 0  # 0 = standard shuffle; >0 = guarantee this many labeled patches per class per batch (SupCon only)
     val_split: float    = 0.2
     loss_norm_flag: bool = False
     group_split: bool   = True   # keep all patches from the same image in the same split
@@ -867,6 +869,23 @@ def _save_reconstructions(
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _collect_annotation_labels(dataset) -> list:
+    """Recursively extract annotation_labels from Subset / ConcatDataset."""
+    if isinstance(dataset, Subset):
+        parent = _collect_annotation_labels(dataset.dataset)
+        return [parent[i] for i in dataset.indices]
+    if isinstance(dataset, ConcatDataset):
+        out = []
+        for ds in dataset.datasets:
+            out.extend(_collect_annotation_labels(ds))
+        return out
+    return list(getattr(dataset, "annotation_labels", [-1] * len(dataset)))
+
+
+# ---------------------------------------------------------------------------
 # Public pipeline entry-point
 # ---------------------------------------------------------------------------
 
@@ -1010,6 +1029,7 @@ def run_ae_pipeline(cfg: AEConfig):
                 condition=condition,
                 condition_name=condition_name,
                 **shared_ann_kwargs,
+                patch_include=entry.get("patch_include", None),
                 # no transform: stacking already produces (C, H, W)
             )
         elif cfg.jitter_crop and "frame_dir" in entry:
@@ -1039,6 +1059,7 @@ def run_ae_pipeline(cfg: AEConfig):
                 pad_size=cfg.enlarged_crop_pad_size,
                 input_divisor=cfg.enlarged_crop_input_divisor,
                 input_clip_max=cfg.enlarged_crop_input_clip_max,
+                include_frames=entry.get("include_frames", None),
                 **shared_ann_kwargs,
             )
         else:
@@ -1121,14 +1142,49 @@ def run_ae_pipeline(cfg: AEConfig):
     # ------------------------------------------------------------------
     # 4. DataLoaders
     # ------------------------------------------------------------------
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        drop_last=False,
-        num_workers=cfg.num_workers,
-        persistent_workers=cfg.num_workers > 0,
-    )
+    if cfg.n_labeled_per_class > 0:
+        _train_labels = _collect_annotation_labels(train_ds)
+        _n_classes = len(set(l for l in _train_labels if l >= 0))
+        _n_labeled  = sum(1 for l in _train_labels if l >= 0)
+        try:
+            _sampler = LabeledAwareBatchSampler(
+                _train_labels,
+                batch_size=cfg.batch_size,
+                n_per_class=cfg.n_labeled_per_class,
+                drop_last=False,
+                seed=42,
+            )
+            log.info(
+                "  LabeledAwareBatchSampler: n_per_class=%d  n_classes=%d  "
+                "labeled=%d  labeled_per_batch=%d / %d",
+                cfg.n_labeled_per_class, _n_classes, _n_labeled,
+                cfg.n_labeled_per_class * _n_classes, cfg.batch_size,
+            )
+            train_loader = DataLoader(
+                train_ds,
+                batch_sampler=_sampler,
+                num_workers=cfg.num_workers,
+                persistent_workers=cfg.num_workers > 0,
+            )
+        except ValueError as e:
+            log.warning("  LabeledAwareBatchSampler disabled (%s) — falling back to shuffle=True", e)
+            train_loader = DataLoader(
+                train_ds,
+                batch_size=cfg.batch_size,
+                shuffle=True,
+                drop_last=False,
+                num_workers=cfg.num_workers,
+                persistent_workers=cfg.num_workers > 0,
+            )
+    else:
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=cfg.batch_size,
+            shuffle=True,
+            drop_last=False,
+            num_workers=cfg.num_workers,
+            persistent_workers=cfg.num_workers > 0,
+        )
     val_loader = DataLoader(
         val_ds,
         batch_size=cfg.batch_size,
@@ -1311,6 +1367,7 @@ def run_ae_pipeline(cfg: AEConfig):
             lambda_hessian=cfg.lambda_hessian,
             log_map_fn=_log_map_fn,
             log_map_inv_fn=_log_map_inv_fn,
+            lambda_supcon=cfg.lambda_supcon,
         )
 
     # ------------------------------------------------------------------

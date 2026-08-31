@@ -38,7 +38,7 @@ import pandas as pd
 import tifffile as tiff
 import torch
 from scipy.ndimage import rotate as _ndrotate
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, Sampler, random_split
 
 # ---------------------------------------------------------------------------
 # Filename normalisation helper
@@ -266,6 +266,7 @@ class MultiChannelPatchDataset(Dataset):
         filename_col_2: str = "crop_img_filename",
         label_order_2: list | None = None,
         transform=None,
+        patch_include: set | list | None = None,
     ):
         if len(channel_dirs) < 2:
             raise ValueError(
@@ -307,6 +308,12 @@ class MultiChannelPatchDataset(Dataset):
         for d in channel_dirs[1:]:
             common &= _tif_names(d)
         common = sorted(common)
+
+        if patch_include is not None:
+            _include_set = {Path(p).name for p in patch_include}
+            before = len(common)
+            common = [f for f in common if f in _include_set]
+            print(f"MultiChannelPatchDataset: patch_include filtered {before} → {len(common)} patches")
 
         n_missing = sum(
             len(_tif_names(d)) for d in channel_dirs
@@ -607,9 +614,11 @@ class EnlargedCropDataset(Dataset):
         label_col_2: str = "Position",
         filename_col_2: str = "crop_img_filename",
         label_order_2: list | None = None,
+        include_frames: set | list | None = None,
     ):
         self.condition      = condition
         self.condition_name = condition_name or str(condition)
+        _include_frames = set(include_frames) if include_frames is not None else None
         self.context_size   = context_size + (context_size % 2)  # ensure even
         self._input_divisor = float(input_divisor)
         self._input_clip_max = float(input_clip_max) if input_clip_max is not None else None
@@ -662,6 +671,8 @@ class EnlargedCropDataset(Dataset):
                 continue
             cond_str = m.group(1)
             fidx     = int(m.group(2))
+            if _include_frames is not None and fidx not in _include_frames:
+                continue
             cx_pad   = int(m.group(3))
             cy_pad   = int(m.group(4))
 
@@ -953,3 +964,118 @@ class AnnotatedTIFFDataset(Dataset):
     def __getitem__(self, idx):
         image, _, annotation_label, _, path = self._ds[idx]
         return image, annotation_label, path
+
+
+# ---------------------------------------------------------------------------
+# LabeledAwareBatchSampler
+# ---------------------------------------------------------------------------
+
+class LabeledAwareBatchSampler(Sampler):
+    """Batch sampler that guarantees ``n_per_class`` labeled patches of each
+    known class appear in every batch.
+
+    Each batch contains:
+      - ``n_per_class × n_classes`` labeled patches (sampled without replacement
+        within the epoch; with replacement only when a class has fewer samples
+        than ``n_per_class``).
+      - ``batch_size - n_per_class × n_classes`` patches drawn uniformly from
+        the full index pool (labeled + unlabeled).
+
+    When ``n_per_class == 0`` the sampler behaves identically to a standard
+    ``shuffle=True`` DataLoader — no behavioural change for existing runs.
+
+    Parameters
+    ----------
+    annotation_labels : sequence of int
+        Per-sample class index; ``-1`` means unlabeled.  Must be aligned with
+        the dataset indices (i.e. already subset-indexed if the dataset is a
+        Subset).
+    batch_size : int
+        Total number of samples per batch.
+    n_per_class : int
+        Labeled samples to guarantee per class per batch.  0 = standard random.
+    drop_last : bool
+        Drop the last incomplete batch.
+    seed : int
+        RNG seed for reproducibility.
+    """
+
+    def __init__(
+        self,
+        annotation_labels: list[int],
+        batch_size: int,
+        n_per_class: int = 0,
+        drop_last: bool = False,
+        seed: int = 0,
+    ):
+        self.batch_size   = batch_size
+        self.n_per_class  = n_per_class
+        self.drop_last    = drop_last
+        self.n_total      = len(annotation_labels)
+        self._seed        = seed
+
+        labels = np.asarray(annotation_labels, dtype=np.int32)
+        classes = sorted(int(c) for c in np.unique(labels) if c >= 0)
+        self._class_idx   = {c: np.where(labels == c)[0] for c in classes}
+        self._all_idx     = np.arange(self.n_total)
+        self._n_classes   = len(classes)
+        self._n_lab_batch = n_per_class * self._n_classes  # reserved labeled slots
+
+        if n_per_class > 0:
+            if self._n_lab_batch > batch_size:
+                raise ValueError(
+                    f"n_per_class ({n_per_class}) × n_classes ({self._n_classes}) = "
+                    f"{self._n_lab_batch} exceeds batch_size ({batch_size})"
+                )
+            if self._n_classes < 2:
+                raise ValueError(
+                    f"LabeledAwareBatchSampler requires ≥2 labeled classes, "
+                    f"found {self._n_classes}"
+                )
+
+    def __len__(self) -> int:
+        if self.drop_last:
+            return self.n_total // self.batch_size
+        return (self.n_total + self.batch_size - 1) // self.batch_size
+
+    def __iter__(self):
+        rng = np.random.default_rng(self._seed)
+
+        if self.n_per_class == 0:
+            # Standard shuffle — identical to DataLoader(shuffle=True)
+            perm = rng.permutation(self.n_total)
+            for start in range(0, self.n_total, self.batch_size):
+                chunk = perm[start : start + self.batch_size].tolist()
+                if len(chunk) < self.batch_size and self.drop_last:
+                    break
+                if chunk:
+                    yield chunk
+            return
+
+        n_fill = self.batch_size - self._n_lab_batch
+
+        # Shuffle each class pool at the start; refill when exhausted
+        class_pools = {
+            c: rng.permutation(idx).tolist()
+            for c, idx in self._class_idx.items()
+        }
+
+        for _ in range(len(self)):
+            batch = []
+
+            # --- guaranteed labeled slots ---
+            for c, idx in self._class_idx.items():
+                pool = class_pools[c]
+                if len(pool) < self.n_per_class:
+                    # Refill with a fresh shuffle
+                    pool = rng.permutation(idx).tolist()
+                    class_pools[c] = pool
+                chosen, class_pools[c] = pool[: self.n_per_class], pool[self.n_per_class :]
+                batch.extend(chosen)
+
+            # --- fill the rest from the full index pool ---
+            fill = rng.choice(self._all_idx, size=n_fill, replace=False).tolist()
+            batch.extend(fill)
+
+            rng.shuffle(batch)
+            yield batch

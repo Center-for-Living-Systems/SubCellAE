@@ -1,0 +1,16 @@
+/net/projects/CLS/lding/gitcode/SubCellAE/config/le_supcon/le_c0_npi10_r0.yaml
+/net/projects/CLS/lding/gitcode/SubCellAE/config/le_supcon/le_c0_npi10_r1.yaml
+/net/projects/CLS/lding/gitcode/SubCellAE/config/le_supcon/le_c0_npi10_r2.yaml
+/net/projects/CLS/lding/gitcode/SubCellAE/config/le_supcon/le_c0_npi25_r0.yaml
+/net/projects/CLS/lding/gitcode/SubCellAE/config/le_supcon/le_c0_npi25_r1.yaml
+/net/projects/CLS/lding/gitcode/SubCellAE/config/le_supcon/le_c0_npi25_r2.yaml
+/net/projects/CLS/lding/gitcode/SubCellAE/config/le_supcon/le_c0_npi50_r0.yaml
+/net/projects/CLS/lding/gitcode/SubCellAE/config/le_supcon/le_c0_npi50_r1.yaml
+/net/projects/CLS/lding/gitcode/SubCellAE/config/le_supcon/le_c0_npi50_r2.yaml
+/net/projects/CLS/lding/gitcode/SubCellAE/config/le_supcon/le_c0_npi75_r0.yaml
+/net/projects/CLS/lding/gitcode/SubCellAE/config/le_supcon/le_c0_npi75_r1.yaml
+/net/projects/CLS/lding/gitcode/SubCellAE/config/le_supcon/le_c0_npi75_r2.yaml
+/net/projects/CLS/lding/gitcode/SubCellAE/config/le_supcon/le_c0_npi100_r0.yaml
+/net/projects/CLS/lding/gitcode/SubCellAE/config/le_supcon/le_c0_npi100_r1.yaml
+/net/projects/CLS/lding/gitcode/SubCellAE/config/le_supcon/le_c0_npi100_r2.yaml
+/net/projects/CLS/lding/gitcode/SubCellAE/config/le_supcon/le_c0_npiall_r0.yaml

@@ -46,8 +46,10 @@ LABEL_ORDER_4 = ["Nascent Adhesion", "focal complex", "focal adhesion", "fibrill
 LABEL_SHORT   = {"Nascent Adhesion": "NA", "focal complex": "FC",
                  "focal adhesion": "FA", "fibrillar adhesion": "Fib"}
 
-def supcon2_dir(split): return RUNS / f"annabel_vinc_supcon2_{split}"
-def cls_dir(split):     return supcon2_dir(split) / "fa_cls_zrecon"
+def supcon2_dir(split):   return RUNS / f"annabel_vinc_supcon2_{split}"
+def cls_dir(split):       return supcon2_dir(split) / "fa_cls_zrecon"
+def stage2_dir(split):    return RUNS / f"annabel_vinc_supcon2_stage2_{split}"
+def stage2_cls_dir(split): return stage2_dir(split) / "stage2_cls"
 
 # ── slide geometry ─────────────────────────────────────────────────────────────
 
@@ -139,7 +141,7 @@ def slide_cover(prs):
          "FA Subtype Classification\n4-class · Annabel vinc/control",
          size=32, bold=True, color=C_WHITE, align=PP_ALIGN.CENTER)
     _txt(sl, Inches(1), Inches(3.6), SW - Inches(2), Inches(0.5),
-         "Stage 1: binary SupCon AE  →  Stage 2: dedicated 4-class SupCon AE",
+         "Stage 1: binary SupCon AE  →  Stage 2: dedicated 4-class SupCon AE  ✓ COMPLETE",
          size=14, color=C_LIGHT, align=PP_ALIGN.CENTER)
     _txt(sl, Inches(1), Inches(4.2), SW - Inches(2), Inches(0.4),
          "vinc / control  ·  cio_mode_prt norm  ·  latent=12  proj=8  ·  LightGBM",
@@ -350,8 +352,8 @@ def slide_4cls_confusion(prs, split="s2v2"):
     note = ("NOTE: Stage 1 SupCon was trained for binary (no-adh vs adh).\n"
             "It was NOT optimised to separate FA subtypes — this is a probe\n"
             "of how much subtype structure is encoded incidentally.\n\n"
-            "Stage 2 (currently training) uses a dedicated SupCon AE\n"
-            "trained ONLY on predicted-adhesion patches with 4-class labels.")
+            "Stage 2 (completed) uses a dedicated SupCon AE trained ONLY on\n"
+            "predicted-adhesion patches with 4-class labels → see next slides.")
     _txt(sl, txt_x, top + Inches(1.8), SW - txt_x - PAD, Inches(2.5),
          note, size=10, color=C_GREY)
 
@@ -397,40 +399,299 @@ def slide_fa4_overlays(prs, split="s2v2"):
         _txt(sl, l, top + h, w, cap_h, cap, size=9, color=C_GREY, align=PP_ALIGN.CENTER)
 
 
-def slide_stage2_plan(prs):
-    """Text slide: Stage 2 dedicated SupCon AE."""
+def slide_stage2_results(prs):
+    """Stage 2 dedicated 4-class SupCon AE — confusion matrices for all 3 splits."""
     sl = _blank(prs)
-    _title_bar(sl, "Stage 2 — Dedicated 4-class SupCon AE  [currently training]",
-               "New AE trained only on Stage-1 predicted-adhesion patches with Annabel FA4 labels")
-    top = TITLE_H + Inches(0.25)
+    _title_bar(sl, "Stage 2 — Dedicated 4-class SupCon AE: Results  (300 epochs)",
+               "New AE trained only on Stage-1 predicted-adhesion patches (5771/14879)  ·  "
+               "LightGBM on Stage 2 latents  ·  all 3 splits")
+    top   = TITLE_H + PAD
+    cap_h = Inches(0.46)
+    w = (SW - 4*PAD) / 3
+    h = SH - top - PAD - cap_h
 
-    lines = [
-        ("Pipeline", True,
-         "Stage 1 (binary SupCon, s2v2 gate)  →  5771 / 14879 predicted-adhesion patches"),
-        ("Stage 2 input", True,
-         "Only the 5771 predicted-adhesion patches enter the new AE (no no-adhesion noise)"),
-        ("Labels", True,
-         "4-class: Nascent Adhesion · focal complex · focal adhesion · fibrillar adhesion\n"
-         "No-adhesion patches treated as unlabeled (contrast loss uses labeled pairs only)"),
-        ("Architecture", True,
-         "Same as Stage 1:  latent=12  proj=8  input=32×32  no_ch=1  nl1 recon  λ_contrast=0.5"),
-        ("Splits", True,
-         "s1v3: frame 0 train / frames 1-3 val\n"
-         "s2v2: frames 0-1 train / frames 2-3 val\n"
-         "s3v1: frames 0-2 train / frame 3 val"),
-        ("Status", True,
-         "Training now:  s1v3 ~108/300 epochs  ·  s2v2 ~78/300  ·  s3v1 ~72/300\n"
-         "ETA: ~4 hours  ·  GPU not available, running on CPU (4 OMP threads)"),
-        ("After training", True,
-         "4-class LightGBM on Stage 2 latents (only adhesion patches) → confusion matrix\n"
-         "Compare to Stage 1 latent probe above — expect much better subtype separation"),
+    notes = {
+        "s1v3": "val: NA=18 FC=5 FA=168 Fib=6\n(frames 1-3)",
+        "s2v2": "val: NA=9 FA=37 (frames 2-3)",
+        "s3v1": "val: FA=46 only\n(frame 3 — single class)",
+    }
+
+    for i, sp in enumerate(SPLITS):
+        l   = PAD + i * (w + PAD)
+        img = stage2_cls_dir(sp) / "confusion_matrix_norm.png"
+        _img_ar(sl, img, l, top, w, h - Inches(0.15), f"[{sp} — pending]")
+
+        # metrics caption
+        m_path = stage2_cls_dir(sp) / "metrics.csv"
+        if m_path.exists():
+            m = pd.read_csv(m_path).iloc[0]
+            acc = m["accuracy"] * 100
+            bal = m["balanced_acc"] * 100
+            cap = (f"{SPLIT_LABEL[sp]}\nacc={acc:.1f}%  bal={bal:.1f}%\n"
+                   f"train n={int(m['n_train'])}  val n={int(m['n_val'])}\n"
+                   + notes.get(sp, ""))
+        else:
+            cap = f"{SPLIT_LABEL[sp]}\n[no metrics]"
+        _txt(sl, l, top + h - Inches(0.15), w, cap_h, cap,
+             size=8, color=C_GREY, align=PP_ALIGN.CENTER)
+
+
+XDS_EVAL_DIR = RUNS / "fa4_xds_eval"
+
+SCENARIO_LABELS = {
+    "vinc_only":  "vinc only\n(within)",
+    "pfak_only":  "pfak only\n(within)",
+    "vinc->pfak": "vinc → pfak\n(cross)",
+    "pfak->vinc": "pfak → vinc\n(cross)",
+    "combined":   "combined\n(within)",
+}
+SCENARIO_COLORS = {
+    "vinc_only":  "#1565C0",
+    "pfak_only":  "#E65100",
+    "vinc->pfak": "#6A1B9A",
+    "pfak->vinc": "#00695C",
+    "combined":   "#2E7D32",
+}
+SCENARIOS = [
+    "vinc_only", "pfak_only", "vinc->pfak", "pfak->vinc", "combined",
+]
+
+
+def slide_xds_strategy(prs):
+    """Strategy overview: Option A vs B, 5 eval scenarios, label efficiency design."""
+    sl = _blank(prs)
+    _title_bar(sl,
+               "Cross-Dataset FA Subtype Classification — Strategy",
+               "Option A (vinc-only AE)  ·  Option B (combined AE)  ·  "
+               "5 eval scenarios  ·  10/25/50/75% label efficiency")
+    top = TITLE_H + PAD
+    col_w = (SW - 4 * PAD) / 2
+
+    # ── Option A ──────────────────────────────────────────────────────────────
+    _rect(sl, PAD, top, col_w, Inches(3.0), fill=RGBColor(0xBD, 0xD7, 0xEE))
+    _txt(sl, PAD + Inches(0.1), top + Inches(0.08), col_w - Inches(0.2), Inches(0.36),
+         "Option A — vinc-only Stage-2 AE  (zero-shot cross-ds)",
+         size=12, bold=True, color=C_DARK)
+    _txt(sl, PAD + Inches(0.1), top + Inches(0.46), col_w - Inches(0.2), Inches(2.4),
+         "Model:  annabel_vinc_supcon2_stage2_s3v1\n"
+         "  · Trained on vinc/ctrl predicted-adhesion patches only\n"
+         "  · Encode vinc/ycomp + pfak/ctrl zero-shot\n\n"
+         "Eval:  LightGBM on Stage-2 latents\n"
+         "  · Repeated subsampling: 10%×10, 25%×4, 50%×4, 75%×4\n"
+         "  · 5 scenarios (below)",
+         size=10, color=C_BLACK)
+
+    # ── Option B ──────────────────────────────────────────────────────────────
+    bx = PAD + col_w + PAD
+    _rect(sl, bx, top, col_w, Inches(3.0), fill=RGBColor(0xD5, 0xE8, 0xD4))
+    _txt(sl, bx + Inches(0.1), top + Inches(0.08), col_w - Inches(0.2), Inches(0.36),
+         "Option B — combined Stage-2 AE  (trained on all datasets)",
+         size=12, bold=True, color=RGBColor(0x1B, 0x5E, 0x20))
+    _txt(sl, bx + Inches(0.1), top + Inches(0.46), col_w - Inches(0.2), Inches(2.4),
+         "Model:  annabel_vinc_supcon2_stage2_combined\n"
+         "  · Trained on all 4 datasets simultaneously\n"
+         "  · vinc/ctrl: Stage-1 gate + 4-class Annabel labels\n"
+         "  · vinc/ycomp: all + Annabel labels\n"
+         "  · pfak/ctrl: all + Annabel labels\n"
+         "  · ppax/ctrl: all + Ernest labels  (4-class FA only)\n"
+         "  · Pretrained from corrected_s3v1  →  300 epochs fine-tune\n\n"
+         "Eval:  same as Option A",
+         size=10, color=C_BLACK)
+
+    # ── Scenarios ─────────────────────────────────────────────────────────────
+    sy = top + Inches(3.1)
+    _txt(sl, PAD, sy, SW - 2 * PAD, Inches(0.3),
+         "Evaluation Scenarios  (5):",
+         size=11, bold=True, color=C_DARK)
+    sy += Inches(0.32)
+    scenario_descs = [
+        ("vinc_only",  "vinc/ctrl + vinc/ycomp  →  vinc  (within-dataset)"),
+        ("pfak_only",  "pfak/ctrl  →  pfak  (within-dataset)"),
+        ("vinc→pfak",  "train vinc, test pfak  (cross-dataset zero-shot)"),
+        ("pfak→vinc",  "train pfak, test vinc  (cross-dataset zero-shot)"),
+        ("combined",   "vinc + pfak combined  →  combined  (within)"),
     ]
-    for k, (label, bold, body) in enumerate(lines):
-        y = top + k * Inches(0.75)
-        _txt(sl, PAD, y, Inches(2.2), Inches(0.4), label + ":", size=11,
-             bold=True, color=C_MID)
-        _txt(sl, Inches(2.4), y, SW - Inches(2.6), Inches(0.7), body,
-             size=10, color=C_BLACK, wrap=True)
+    box_w = (SW - 6 * PAD) / 5
+    for i, (name, desc) in enumerate(scenario_descs):
+        bxi = PAD + i * (box_w + PAD)
+        col = SCENARIO_COLORS.get(name.replace("→", "->"), C_GREY)
+        _rect(sl, bxi, sy, box_w, Inches(1.0), fill=None)
+        sl.shapes[-1].line.color.rgb = RGBColor(*bytes.fromhex(col[1:]))
+        sl.shapes[-1].line.width = Pt(1.5)
+        _txt(sl, bxi + Inches(0.05), sy + Inches(0.05), box_w - Inches(0.1), Inches(0.35),
+             name, size=10, bold=True, color=RGBColor(*bytes.fromhex(col[1:])))
+        _txt(sl, bxi + Inches(0.05), sy + Inches(0.42), box_w - Inches(0.1), Inches(0.55),
+             desc, size=8, color=C_BLACK)
+
+    # ── ppax zero-shot note ───────────────────────────────────────────────────
+    _txt(sl, PAD, sy + Inches(1.1), SW - 2 * PAD, Inches(0.7),
+         "ppax zero-shot  (both options):  apply Stage-1 binary GBM → Stage-2 4-class GBM "
+         "to ppax/ctrl patches.\n"
+         "Ernest labels are 4-class FA only (no 'No adhesion') — "
+         "Stage-1 false negatives = FA patches predicted as no-adhesion.",
+         size=10, color=C_GREY)
+
+
+def _xds_suffix(option: str, variant: str = "zrecon", smote: bool = False) -> str:
+    return f"{option}_{variant}" + ("_smote" if smote else "")
+
+
+def slide_xds_results(prs, option: str, variant: str = "zrecon", smote: bool = False):
+    """Cross-dataset label efficiency results — balanced accuracy + macro F1."""
+    suffix = _xds_suffix(option, variant, smote)
+    tag = f"Option {option}  {variant}" + ("  SMOTE" if smote else "")
+    sl = _blank(prs)
+    _title_bar(sl,
+               f"Cross-Dataset Results — {tag}",
+               "Stage-2 SupCon AE  ·  LightGBM  ·  5 scenarios  ·  repeated stratified subsampling")
+
+    top   = TITLE_H + PAD
+    img_h = (SH - top - 2 * PAD) / 2
+
+    _img_ar(sl, XDS_EVAL_DIR / f"efficiency_bal_acc_{suffix}.png",
+            PAD, top, SW - 2 * PAD, img_h,
+            f"[{tag} — balanced accuracy — pending]")
+    _img_ar(sl, XDS_EVAL_DIR / f"efficiency_macro_f1_{suffix}.png",
+            PAD, top + img_h + PAD, SW - 2 * PAD, img_h,
+            f"[{tag} — macro F1 — pending]")
+
+
+def slide_xds_perclass(prs, option: str, variant: str = "zrecon", smote: bool = False):
+    """Per-class F1 breakdown."""
+    suffix = _xds_suffix(option, variant, smote)
+    tag = f"Option {option}  {variant}" + ("  SMOTE" if smote else "")
+    sl = _blank(prs)
+    _title_bar(sl,
+               f"Cross-Dataset Per-Class F1 — {tag}",
+               "NA / FC / FA / Fibrillar  ·  rows = class, columns = scenario")
+
+    top = TITLE_H + PAD
+    _img_ar(sl, XDS_EVAL_DIR / f"efficiency_perclass_{suffix}.png",
+            PAD, top, SW - 2 * PAD, SH - top - PAD,
+            f"[{tag} — per-class F1 — pending]")
+
+
+def slide_ppax_zeroshot(prs, option: str, variant: str = "zrecon", smote: bool = False):
+    """ppax zero-shot evaluation slide."""
+    suffix = _xds_suffix(option, variant, smote)
+    tag = f"Option {option}  {variant}" + ("  SMOTE" if smote else "")
+    sl = _blank(prs)
+    _title_bar(sl,
+               f"ppax Zero-Shot — {tag}",
+               "Ernest labels (4-class FA only)  ·  Stage-1 binary gate → Stage-2 4-class")
+
+    top = TITLE_H + PAD
+    confusion_img = XDS_EVAL_DIR / f"ppax_zeroshot_confusion_{suffix}.png"
+    summary_csv   = XDS_EVAL_DIR / f"ppax_zeroshot_summary_{suffix}.csv"
+
+    _img_ar(sl, confusion_img,
+            PAD, top, Inches(6.0), SH - top - Inches(1.0),
+            f"[ppax zero-shot confusion — {tag} — pending]")
+
+    rx = PAD + Inches(6.2)
+    rw = SW - rx - PAD
+    _txt(sl, rx, top, rw, Inches(0.3),
+         "Summary statistics:", size=11, bold=True, color=C_DARK)
+
+    if summary_csv.exists():
+        try:
+            s = pd.read_csv(summary_csv).iloc[0]
+            lines = [
+                f"Ernest-labeled patches:  {int(s.get('n_ernest', 0))}",
+                f"Stage-1 recall:          {float(s.get('s1_recall', float('nan'))):.3f}",
+                f"Stage-1 false negatives: {int(s.get('n_false_neg', 0))}",
+                "",
+                f"Stage-2 evaluated:       {int(s.get('n_eval', 0))}",
+                f"Stage-2 balanced acc:    {float(s.get('bal_acc_s2', float('nan'))):.3f}",
+            ]
+            _txt(sl, rx, top + Inches(0.38), rw, SH - top - Inches(1.4),
+                 "\n".join(lines), size=12, color=C_BLACK)
+        except Exception as e:
+            _txt(sl, rx, top + Inches(0.38), rw, Inches(1.0),
+                 f"[error: {e}]", size=10, color=C_RED)
+    else:
+        _txt(sl, rx, top + Inches(0.38), rw, Inches(0.4),
+             "[pending]", size=11, color=C_GREY)
+
+    _txt(sl, PAD, SH - Inches(0.35), SW - 2 * PAD, Inches(0.3),
+         "Stage-2 GBM trained on all vinc + pfak labeled patches (100%).  "
+         "Stage-1 recall < 1.0 = Ernest-labeled FA patches filtered by binary gate.",
+         size=8, color=C_GREY)
+
+
+def slide_variant_comparison(prs, option: str):
+    """Grouped bar chart: bal_acc at 75% training fraction across variants × scenarios."""
+    VARIANTS = [
+        ("zrecon",       False, "zrecon",       "#1565C0"),
+        ("zproj",        False, "zproj",        "#E65100"),
+        ("zrecon",       True,  "zrecon+SMOTE", "#6A1B9A"),
+        ("zproj",        True,  "zproj+SMOTE",  "#00695C"),
+    ]
+
+    frac_show = 0.75
+
+    # Build data: variant → scenario → bal_acc
+    data = {}
+    for variant, smote, label, _ in VARIANTS:
+        suffix = _xds_suffix(option, variant, smote)
+        csv = XDS_EVAL_DIR / f"summary_{suffix}.csv"
+        if not csv.exists():
+            continue
+        df = pd.read_csv(csv)
+        row = df[df["frac"] == frac_show]
+        if len(row) == 0:
+            continue
+        data[label] = {r["scenario"]: r["bal_acc_mean"] * 100
+                       for _, r in row.iterrows()}
+
+    if not data:
+        sl = _blank(prs)
+        _title_bar(sl, f"Variant Comparison — Option {option}  (pending)", "")
+        return
+
+    sc_order = ["vinc_only", "pfak_only", "vinc->pfak", "pfak->vinc", "combined"]
+    sc_labels = ["vinc only", "pfak only", "vinc→pfak", "pfak→vinc", "combined"]
+    var_labels = list(data.keys())
+    colors = {label: c for _, _, label, c in VARIANTS if label in data}
+
+    x = np.arange(len(sc_order))
+    n_vars = len(var_labels)
+    width  = 0.18
+    offsets = np.linspace(-(n_vars - 1) / 2, (n_vars - 1) / 2, n_vars) * width
+
+    fig, ax = plt.subplots(figsize=(12, 4.5), facecolor="white")
+    for i, (vlab, offset) in enumerate(zip(var_labels, offsets)):
+        vals = [data[vlab].get(sc, 0) for sc in sc_order]
+        bars = ax.bar(x + offset, vals, width, label=vlab,
+                      color=colors.get(vlab, "#888888"), alpha=0.85)
+        for bar, v in zip(bars, vals):
+            if v > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, v + 0.5,
+                        f"{v:.0f}", ha="center", va="bottom", fontsize=7)
+
+    ax.axhline(50, color="#AAAAAA", linestyle="--", linewidth=0.8, label="50% (chance)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(sc_labels, fontsize=10)
+    ax.set_ylabel("Balanced accuracy (%)", fontsize=10)
+    ax.set_ylim(0, 80)
+    ax.legend(fontsize=9, loc="upper right")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.set_facecolor("white")
+    ax.set_title(f"Option {option} — variant comparison at {int(frac_show*100)}% training labels",
+                 fontsize=11, fontweight="bold")
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    buf.seek(0)
+
+    sl = _blank(prs)
+    _title_bar(sl,
+               f"Variant Comparison — Option {option}  (balanced accuracy @ 75% labels)",
+               "zrecon vs zproj vs +SMOTE  ·  5 cross-dataset scenarios")
+    top = TITLE_H + PAD
+    sl.shapes.add_picture(buf, PAD, top, SW - 2 * PAD, SH - top - Inches(0.3))
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -477,8 +738,45 @@ def main():
     slide_overlays(prs, args.split)
     print(f"  8. Binary overlays on frames 0-3 ({args.split})")
 
-    slide_stage2_plan(prs)
-    print("  9. Stage 2 plan (currently training)")
+    slide_stage2_results(prs)
+    print("  9. Stage 2 results — 3-split confusion matrices")
+
+    slide_xds_strategy(prs)
+    print(" 10. Cross-dataset strategy (Option A / B)")
+
+    # Option A — zrecon (baseline)
+    slide_xds_results(prs, "A", "zrecon")
+    slide_xds_perclass(prs, "A", "zrecon")
+    slide_ppax_zeroshot(prs, "A", "zrecon")
+    print(" 11-13. Option A zrecon (efficiency + per-class + ppax)")
+
+    # Option A — zproj
+    slide_xds_results(prs, "A", "zproj")
+    slide_xds_perclass(prs, "A", "zproj")
+    slide_ppax_zeroshot(prs, "A", "zproj")
+    print(" 14-16. Option A zproj")
+
+    # Option A — zrecon + SMOTE
+    slide_xds_results(prs, "A", "zrecon", smote=True)
+    slide_xds_perclass(prs, "A", "zrecon", smote=True)
+    slide_ppax_zeroshot(prs, "A", "zrecon", smote=True)
+    print(" 17-19. Option A zrecon+SMOTE")
+
+    # Option A — zproj + SMOTE
+    slide_xds_results(prs, "A", "zproj", smote=True)
+    slide_xds_perclass(prs, "A", "zproj", smote=True)
+    slide_ppax_zeroshot(prs, "A", "zproj", smote=True)
+    print(" 20-22. Option A zproj+SMOTE")
+
+    # Option A — variant comparison
+    slide_variant_comparison(prs, "A")
+    print(" 23. Option A variant comparison (bar chart)")
+
+    # Option B — zrecon
+    slide_xds_results(prs, "B", "zrecon")
+    slide_xds_perclass(prs, "B", "zrecon")
+    slide_ppax_zeroshot(prs, "B", "zrecon")
+    print(" 24-26. Option B results")
 
     prs.save(str(args.out))
     n = len(prs.slides)

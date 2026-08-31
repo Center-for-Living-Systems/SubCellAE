@@ -36,6 +36,8 @@ ACTIN_MODELS = [
 ]
 
 PAX_MODELS = [
+    ("baseline_vinc_only_pax",
+     "Baseline\nPax"),
     ("contrastive_cio_rb_vinc_lat12proj8_enlcrop_sc2_nl1",
      "ConAE nL1\n(pax ch1)"),
     ("contrastive_cio_rb_vinc_lat12proj8_enlcrop_sc2_nl1_lc025",

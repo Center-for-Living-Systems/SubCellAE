@@ -1,0 +1,2 @@
+config/le_combined_s2v2/le_comb_s2_n005_npi50_r2.yaml
+config/le_combined_s2v2/le_comb_s2_n006_npi10_r2.yaml
