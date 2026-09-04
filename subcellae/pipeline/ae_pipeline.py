@@ -43,7 +43,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import ConcatDataset, DataLoader, Subset, random_split
 
-from subcellae.modelling.dataset import PatchDataset, MultiChannelPatchDataset, JitterCropDataset, EnlargedCropDataset, MultiChannelEnlargedCropDataset, LabeledAwareBatchSampler
+from subcellae.modelling.dataset import PatchDataset, MultiChannelPatchDataset, JitterCropDataset, EnlargedCropDataset, MultiChannelEnlargedCropDataset, LabeledAwareBatchSampler, CoordCropDataset
 from subcellae.modelling.autoencoders import (
     AE, train_ae,
     VAE32, train_vae,
@@ -148,6 +148,12 @@ class AEConfig:
     # --- required ---
     result_dir: Path
     patch_dirs: list      # list of dicts: [{path, condition, condition_name}, ...]
+
+    # --- multiscale / online-crop (AE_multiscale branch) ---
+    # Each entry: {coord_csv, frame_dir, channel, condition, condition_name}
+    # Patches are cropped on-the-fly at input_ps from source frame TIFFs.
+    # When non-empty, patch_dirs may be an empty list.
+    coord_dirs: list = None
 
     # --- model selection ---
     model_type: str = "ae"
@@ -284,6 +290,10 @@ class AEConfig:
         self.result_dir = Path(self.result_dir)
         self.result_dir.mkdir(parents=True, exist_ok=True)
 
+        # Default empty lists
+        if self.coord_dirs is None:
+            self.coord_dirs = []
+
         # Validate model_type
         if self.model_type not in _VALID_MODEL_TYPES:
             raise ValueError(
@@ -301,26 +311,31 @@ class AEConfig:
 # ---------------------------------------------------------------------------
 
 def _extract_group_key(path: str) -> str:
-    """Return the image-level group key from a patch filename.
+    """Return the image-level group key from a patch filename or coord key.
 
-    Filename format: ``{prefix}_f{NNNN}x{xxxx}y{yyyy}ps{pp}.tif``
-    Group key      : ``{dataset}_{prefix}_f{NNNN}``
+    Patch filename format  : ``{prefix}_f{NNNN}x{xxxx}y{yyyy}ps{pp}.tif``
+    CoordCropDataset format: ``{condition_name}_f{NNNN}_cx{xx}_cy{yy}``
 
-    The dataset prefix is the directory two levels above the patch dir
-    (e.g. .../vinc/control/tiff_patches32_mr10/fname → "vinc").
-    This prevents frames from different datasets with the same filename
-    (e.g. vinc control_f0001 vs ppax control_f0001) from being merged.
-    Falls back to the full stem if the pattern is not matched.
+    Group key: ``{dataset}_{prefix}_f{NNNN}`` where dataset is the grandparent
+    directory of the patch file (not available for coord keys → omitted).
+
+    Falls back to the full stem if neither pattern is matched.
     """
-    stem = Path(path).stem   # strip .tif
+    stem = Path(path).stem   # strip extension (noop if already no extension)
+    # Standard patch filename: condition_f0001x0112y0496ps32
     m = re.match(r'^(.+_f\d+)x\d+', stem)
-    frame_group = m.group(1) if m else stem
-    # dataset prefix: grandparent of the patch directory
-    try:
-        dataset_prefix = Path(path).parents[2].name
-    except IndexError:
-        dataset_prefix = ""
-    return f"{dataset_prefix}_{frame_group}" if dataset_prefix else frame_group
+    if m:
+        frame_group = m.group(1)
+        try:
+            dataset_prefix = Path(path).parents[2].name
+        except IndexError:
+            dataset_prefix = ""
+        return f"{dataset_prefix}_{frame_group}" if dataset_prefix else frame_group
+    # CoordCropDataset key: condition_f0001_cx528_cy496
+    m2 = re.match(r'^(.+_f\d+)_cx\d+', stem)
+    if m2:
+        return m2.group(1)
+    return stem
 
 
 def _grouped_train_val_split(
@@ -1101,8 +1116,45 @@ def run_ae_pipeline(cfg: AEConfig):
         per_ds_val_splits_raw.append(entry.get("val_split", None))
         datasets.append(ds)
 
+    # ------------------------------------------------------------------
+    # 2b. CoordCropDataset entries (multiscale / online-crop)
+    # ------------------------------------------------------------------
+    for entry in cfg.coord_dirs:
+        condition      = int(entry.get("condition", 0))
+        condition_name = str(entry.get("condition_name", str(condition)))
+        coord_csv  = entry["coord_csv"]
+        frame_dir  = entry["frame_dir"]
+        channel    = entry.get("channel", "pax")
+
+        ann_col    = entry.get("annotation_label_col",
+                               cfg.label_col if cfg.annotation_file else None)
+        lbl_order  = entry.get("label_order", cfg.label_order)
+
+        ds = CoordCropDataset(
+            frame_dir=frame_dir,
+            coord_csv=coord_csv,
+            patch_size=cfg.input_ps,
+            channel=channel,
+            condition=condition,
+            condition_name=condition_name,
+            annotation_label_col=ann_col,
+            label_order=lbl_order,
+        )
+
+        if ds.num_classes > 0:
+            cfg.num_classes = ds.num_classes
+            log.info("  CoordCropDataset [%s]: %d patches  patch_size=%d  %d classes",
+                     condition_name, len(ds), cfg.input_ps, ds.num_classes)
+            log.info("  Label mapping: %s", ds.label_to_int)
+        else:
+            log.info("  CoordCropDataset [%s]: %d patches  patch_size=%d  (unlabelled)",
+                     condition_name, len(ds), cfg.input_ps)
+
+        per_ds_val_splits_raw.append(entry.get("val_split", None))
+        datasets.append(ds)
+
     if not datasets:
-        raise ValueError("patch_dirs is empty; nothing to train on.")
+        raise ValueError("patch_dirs and coord_dirs are both empty; nothing to train on.")
 
     full_dataset = ConcatDataset(datasets)
     total = len(full_dataset)

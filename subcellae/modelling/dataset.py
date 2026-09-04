@@ -1079,3 +1079,184 @@ class LabeledAwareBatchSampler(Sampler):
 
             rng.shuffle(batch)
             yield batch
+
+
+# ---------------------------------------------------------------------------
+# Coordinate-crop dataset (multiscale / online-crop)
+# ---------------------------------------------------------------------------
+
+class CoordCropDataset(Dataset):
+    """Load patches on-the-fly from source frames using center coordinates.
+
+    Instead of reading pre-saved patch TIFs, this class:
+      1. Loads full-frame source TIFFs from ``frame_dir`` at ``__init__`` time
+         (one TIFF per unique frame index — typically 6–8 frames per condition).
+      2. At ``__getitem__`` crops a ``patch_size × patch_size`` region centred at
+         ``(cx, cy)`` with reflect-padding when the crop would exceed frame bounds.
+
+    This design makes the same set of patch coordinates reusable at *any* patch
+    size, enabling apples-to-apples comparisons of AE16 vs AE32 vs AE64 etc.
+
+    Parameters
+    ----------
+    frame_dir : str
+        Directory containing source-frame TIFFs named
+        ``{condition_name}_f{frame_idx:04d}_{channel}.tif``
+        (produced by :func:`frameextract_pipeline.run_frameextract_pipeline`).
+    coord_csv : str
+        CSV produced by ``scripts/convert_labels_to_coords.py`` with columns:
+        ``dataset, condition, condition_name, frame_idx, cx, cy, source_ps,
+        split, label, annotator``.
+    patch_size : int
+        Output spatial size (square).  May differ from ``source_ps``.
+    channel : str
+        Channel token in the frame filename, e.g. ``"pax"``, ``"vinc"``.
+    condition : int
+        Integer condition ID (stored in the returned 5-tuple).
+    condition_name : str | None
+        Filter coord_csv to rows matching this condition_name.
+        ``None`` keeps all rows.
+    annotation_label_col : str | None
+        Column in coord_csv to use as the primary annotation label.
+        Typically ``"label"``.  ``None`` → all annotations are ``-1``.
+    label_order : list[str] | None
+        Ordered list of label strings for integer encoding.
+        ``None`` → sorted unique values from the column.
+    split_filter : str | None
+        If given (``"train"`` or ``"val"``), only rows with
+        ``split == split_filter`` are loaded.  Use ``None`` to load all rows.
+
+    Returns (same 5-tuple as PatchDataset)
+    ---------------------------------------
+    ``(image, condition, annotation_label, -1, coord_key)``
+
+    where:
+    * ``image``            – ``(1, patch_size, patch_size)`` float32 in [0, 1]
+    * ``condition``        – the integer condition ID
+    * ``annotation_label`` – integer class or -1
+    * ``-1``               – placeholder for unused secondary annotation
+    * ``coord_key``        – string ``"{condition_name}_f{frame:04d}_cx{cx}_cy{cy}"``
+    """
+
+    def __init__(
+        self,
+        frame_dir: str,
+        coord_csv: str,
+        patch_size: int = 32,
+        channel: str = "pax",
+        condition: int = 0,
+        condition_name: str | None = None,
+        annotation_label_col: str | None = "label",
+        label_order: list | None = None,
+        split_filter: str | None = None,
+    ):
+        self.patch_size = patch_size
+        self.condition  = condition
+        self.channel    = channel
+
+        # ---- Load coord CSV ----
+        df = pd.read_csv(coord_csv)
+        if condition_name is not None:
+            df = df[df["condition_name"] == condition_name].copy()
+        if split_filter is not None and "split" in df.columns:
+            df = df[df["split"] == split_filter].copy()
+        df = df.reset_index(drop=True)
+
+        # ---- Annotation mapping ----
+        self.label_order   = []
+        self.label_to_int  = {}
+        self.num_classes   = 0
+        self._ann_labels: list[int] = []
+
+        if annotation_label_col and annotation_label_col in df.columns:
+            raw = df[annotation_label_col].fillna("").astype(str)
+            if label_order is None:
+                label_order = sorted({v for v in raw if v and v != "nan" and v != ""})
+            self.label_order  = label_order
+            self.label_to_int = {lbl: i for i, lbl in enumerate(label_order)}
+            self.num_classes  = len(label_order)
+            self._ann_labels  = [self.label_to_int.get(v, -1) for v in raw]
+        else:
+            self._ann_labels = [-1] * len(df)
+
+        # ---- Load source frames into memory ----
+        frame_dir_path = Path(frame_dir)
+        self._frames: dict[int, np.ndarray] = {}   # frame_idx → (H, W) float32 array
+
+        for fidx in df["frame_idx"].unique():
+            cname = (condition_name or df[df["frame_idx"] == fidx]["condition_name"].iloc[0])
+            fname = frame_dir_path / f"{cname}_f{int(fidx):04d}_{channel}.tif"
+            if not fname.exists():
+                raise FileNotFoundError(
+                    f"Source frame not found: {fname}\n"
+                    f"Expected pattern: {{condition_name}}_f{{frame_idx:04d}}_{{channel}}.tif"
+                )
+            arr = tiff.imread(str(fname)).astype(np.float32)
+            # Normalise to [0, 1] per frame
+            lo, hi = arr.min(), arr.max()
+            if hi > lo:
+                arr = (arr - lo) / (hi - lo)
+            self._frames[int(fidx)] = arr
+
+        # ---- Store coordinates and metadata ----
+        self._frame_idx = df["frame_idx"].astype(int).tolist()
+        self._cx        = df["cx"].astype(int).tolist()
+        self._cy        = df["cy"].astype(int).tolist()
+        self._cname     = (df["condition_name"].tolist()
+                           if "condition_name" in df.columns
+                           else [condition_name or ""] * len(df))
+        self._splits    = (df["split"].tolist() if "split" in df.columns
+                           else ["train"] * len(df))
+
+        n_ann = sum(1 for l in self._ann_labels if l >= 0)
+        print(
+            f"CoordCropDataset [{condition_name or 'all'}]: {len(df)} coords, "
+            f"patch_size={patch_size}, channel={channel}, "
+            f"{n_ann} annotated, {len(self._frames)} frames loaded"
+        )
+
+    @property
+    def paths(self) -> list[str]:
+        """Coord keys used as identifiers (mirrors PatchDataset.paths for split logic)."""
+        return [
+            f"{self._cname[i]}_f{self._frame_idx[i]:04d}_cx{self._cx[i]}_cy{self._cy[i]}"
+            for i in range(len(self._frame_idx))
+        ]
+
+    def __len__(self) -> int:
+        return len(self._frame_idx)
+
+    def __getitem__(self, idx: int):
+        fidx = self._frame_idx[idx]
+        cx   = self._cx[idx]
+        cy   = self._cy[idx]
+        ps   = self.patch_size
+        half = ps // 2
+
+        frame = self._frames[fidx]          # (H, W) float32
+        H, W  = frame.shape
+
+        # Compute crop window in frame coords
+        r0, r1 = cy - half, cy - half + ps   # row range
+        c0, c1 = cx - half, cx - half + ps   # col range
+
+        # Determine required padding
+        pad_top    = max(0, -r0)
+        pad_bottom = max(0, r1 - H)
+        pad_left   = max(0, -c0)
+        pad_right  = max(0, c1 - W)
+
+        if pad_top or pad_bottom or pad_left or pad_right:
+            frame = np.pad(frame, ((pad_top, pad_bottom), (pad_left, pad_right)),
+                           mode="reflect")
+            r0 += pad_top;  c0 += pad_left
+
+        patch = frame[r0: r0 + ps, c0: c0 + ps].copy()
+
+        # Wrap in (1, H, W) tensor
+        image = torch.tensor(patch, dtype=torch.float32).unsqueeze(0)
+
+        coord_key = (
+            f"{self._cname[idx]}_f{fidx:04d}_cx{cx}_cy{cy}"
+        )
+        return image, self.condition, self._ann_labels[idx], -1, coord_key
