@@ -77,9 +77,10 @@ C_IL     = RGBColor(0xD6, 0x5F, 0x0E)
 C_ROW_A  = RGBColor(0xF5, 0xF7, 0xFF)
 C_ROW_B  = RGBColor(0xE8, 0xED, 0xFF)
 
-COL_SUPCON  = "#e377c2"   # pink
-COL_CP      = "#1f77b4"   # blue
-COL_ILASTIK = "#ff7f0e"   # orange
+COL_SUPCON   = "#e377c2"   # pink  (lat=12)
+COL_SUPCON64 = "#2ca02c"   # green (lat=64)
+COL_CP       = "#1f77b4"   # blue
+COL_ILASTIK  = "#ff7f0e"   # orange
 
 # Histogram class colors (feature distributions)
 HIST_COL_AD   = "#555555"   # adhesion: dark grey
@@ -335,6 +336,7 @@ def _slide_design(prs, title: str, subtitle: str,
 
 BUDGETS_B2      = [10, 20, 25, 50, 75, 100, 150, 200, 300, 500, 750]
 BUDGETS_B12     = [10, 25, 50, 75, 150, 400, 750]
+BUDGETS_B12_FULL = [10, 20, 25, 50, 75, 100, 150, 200, 300, 400, 500, 750, 1000, 1250, 1500]
 BUDGETS_B12_DS2 = [10, 20, 25, 50, 75, 100, 150]
 
 
@@ -344,6 +346,17 @@ def _summarize(path, budgets):
     num["budget_int"] = num["budget"].astype(int)
     s   = num.groupby("budget_int")["bal_acc"].agg(["mean", "std"])
     s   = s.reindex(budgets)
+    return s
+
+
+def _summarize_ctrlvy(path, subset, budgets):
+    """Summarize ctrl-vs-ycomp eval CSV for one subset (all/ad/noad)."""
+    df = pd.read_csv(path)
+    df = df[df["subset"] == subset]
+    num = df[df["budget"] != "all"].copy()
+    num["budget_int"] = num["budget"].astype(int)
+    s = num.groupby("budget_int")["bal_acc"].agg(["mean", "std"])
+    s = s.reindex(budgets)
     return s
 
 
@@ -1385,18 +1398,51 @@ def _slide_supcon_top_features(prs, budget: str = "150", fold: int = 0, repeat: 
 # UMAP comparison slides
 # ---------------------------------------------------------------------------
 
+# Color maps for multi-class UMAP coloring
+COLORS_4CLASS = {
+    "ctrl · adhesion":    "#1f78b4",   # dark blue
+    "ctrl · No adhesion": "#a6cee3",   # light blue
+    "ycomp · adhesion":   "#e31a1c",   # dark red
+    "ycomp · No adhesion":"#fb9a99",   # light red
+}
+
+COLORS_5CLASS = {
+    "No adhesion":        "#888888",   # grey
+    "focal adhesion":     "#1f77b4",   # blue
+    "Nascent Adhesion":   "#ff7f0e",   # orange
+    "focal complex":      "#2ca02c",   # green
+    "fibrillar adhesion": "#9467bd",   # purple
+}
+
+
 def _compute_umap_embedding(X: np.ndarray, seed: int = 42) -> np.ndarray:
     """PCA-based 2D embedding via covariance eigendecomposition (fast, avoids large-matrix SVD)."""
     X_c = X - X.mean(axis=0)
     col_std = X_c.std(axis=0)
     col_std[col_std == 0] = 1.0
     X_c = X_c / col_std
-    # Covariance matrix is (n_features × n_features) — far smaller than data matrix
     cov = X_c.T @ X_c / max(X_c.shape[0] - 1, 1)
     eigenvalues, eigenvectors = np.linalg.eigh(cov)
-    # eigh returns ascending order; take top 2
     top2 = eigenvectors[:, -2:][:, ::-1]
     return X_c @ top2
+
+
+def _ax_umap_multiclass(ax, emb, labels, color_map, title):
+    """General scatter for any multi-class coloring. Unknown labels → grey bg."""
+    known = set(color_map.keys())
+    labels = np.array(labels)
+    bg = np.where(~np.isin(labels, list(known)))[0]
+    if len(bg):
+        ax.scatter(emb[bg, 0], emb[bg, 1],
+                   c="#DDDDDD", s=2, alpha=0.3, linewidths=0, rasterized=True)
+    for cls, col in color_map.items():
+        idx = np.where(labels == cls)[0]
+        if len(idx):
+            ax.scatter(emb[idx, 0], emb[idx, 1],
+                       c=col, s=10, alpha=0.8, linewidths=0, label=cls, rasterized=True)
+    ax.set_title(title, fontsize=9, fontweight="bold")
+    ax.set_xticks([]); ax.set_yticks([])
+    ax.spines[["top", "right", "left", "bottom"]].set_visible(False)
 
 
 def _ax_umap(ax, emb, labels, title, bg_idx=None):
@@ -1407,16 +1453,51 @@ def _ax_umap(ax, emb, labels, title, bg_idx=None):
         fg_idx = np.array([i for i in range(len(emb)) if i not in set(bg_idx)])
     else:
         fg_idx = np.arange(len(emb))
-
     for cls, col in colors.items():
         idx = fg_idx[[labels[i] == cls for i in fg_idx]]
         if len(idx):
             ax.scatter(emb[idx, 0], emb[idx, 1],
                        c=col, s=10, alpha=0.8, linewidths=0, label=cls, rasterized=True)
-
     ax.set_title(title, fontsize=9, fontweight="bold")
     ax.set_xticks([]); ax.set_yticks([])
     ax.spines[["top", "right", "left", "bottom"]].set_visible(False)
+
+
+def _load_embeddings(budget, fold, repeat):
+    """Load CP/ilastik/SupCon features, compute PCA embeddings.
+    Returns (common, cp_emb, il_emb, lat_emb) or None if latents missing."""
+    cp_df = pd.read_csv(CP_CSV)
+    il_df = pd.read_csv(IL_CSV)
+
+    run_name    = f"le_b2_lat12p8_ds1_fv{fold}_nb{budget}_r{repeat}"
+    latent_path = LE_B2_DIR / run_name / "latents.csv"
+    if not latent_path.exists():
+        print(f"  UMAP: SupCon latents not found for nb={budget}, skipping", flush=True)
+        return None
+
+    lat_df = pd.read_csv(latent_path)
+    lat_df["filename"] = lat_df["filename"].apply(
+        lambda x: x.replace("-f", "_f", 1) if isinstance(x, str) else x
+    )
+    z_cols = [c for c in lat_df.columns if c.startswith("z_")]
+
+    common = sorted(set(cp_df["filename"]) & set(il_df["filename"]) & set(lat_df["filename"]))
+    print(f"  UMAP nb={budget}: {len(common)} common patches", flush=True)
+
+    cp_X  = cp_df.set_index("filename").reindex(common).values.astype(float)
+    il_X  = il_df.set_index("filename").reindex(common).values.astype(float)
+    lat_X = lat_df.set_index("filename").reindex(common)[z_cols].values.astype(float)
+
+    for X in [cp_X, il_X, lat_X]:
+        col_means = np.nanmean(X, axis=0)
+        nan_mask  = np.isnan(X)
+        X[nan_mask] = np.take(col_means, np.where(nan_mask)[1])
+
+    print("  Computing PCA embeddings …", flush=True)
+    cp_emb  = _compute_umap_embedding(cp_X)
+    il_emb  = _compute_umap_embedding(il_X)
+    lat_emb = _compute_umap_embedding(lat_X)
+    return common, cp_emb, il_emb, lat_emb
 
 
 def _slide_umap_comparison(prs, budget: str = "150", fold: int = 0, repeat: int = 0):
@@ -1426,42 +1507,13 @@ def _slide_umap_comparison(prs, budget: str = "150", fold: int = 0, repeat: int 
         lambda x: "adhesion" if x != "No adhesion" else "No adhesion"
     )))
 
-    cp_df = pd.read_csv(CP_CSV)
-    il_df = pd.read_csv(IL_CSV)
-
-    run_name = f"le_b2_lat12p8_ds1_fv{fold}_nb{budget}_r{repeat}"
-    latent_path = LE_B2_DIR / run_name / "latents.csv"
-    if not latent_path.exists():
-        print(f"  UMAP: SupCon latents not found for nb={budget}, skipping", flush=True)
+    result = _load_embeddings(budget, fold, repeat)
+    if result is None:
         return
-
-    lat_df = pd.read_csv(latent_path)
-    lat_df["filename"] = lat_df["filename"].apply(
-        lambda x: x.replace("-f", "_f", 1) if isinstance(x, str) else x
-    )
-    z_cols = [c for c in lat_df.columns if c.startswith("z_")]
-
-    common = set(cp_df["filename"]) & set(il_df["filename"]) & set(lat_df["filename"])
-    common = sorted(common)
-    print(f"  UMAP nb={budget}: {len(common)} common patches", flush=True)
+    common, cp_emb, il_emb, lat_emb = result
 
     labels = np.array([ann_map.get(f, "unknown") for f in common])
     bg_idx = np.where(labels == "unknown")[0]
-
-    cp_X  = cp_df.set_index("filename").reindex(common).values.astype(float)
-    il_X  = il_df.set_index("filename").reindex(common).values.astype(float)
-    lat_X = lat_df.set_index("filename").reindex(common)[z_cols].values.astype(float)
-
-    # replace NaNs with column means
-    for X in [cp_X, il_X, lat_X]:
-        col_means = np.nanmean(X, axis=0)
-        nan_mask = np.isnan(X)
-        X[nan_mask] = np.take(col_means, np.where(nan_mask)[1])
-
-    print("  Computing dimensionality reductions …", flush=True)
-    cp_emb  = _compute_umap_embedding(cp_X)
-    il_emb  = _compute_umap_embedding(il_X)
-    lat_emb = _compute_umap_embedding(lat_X)
 
     fig, axes = plt.subplots(1, 3, figsize=(13, 4.8), facecolor="white")
     _ax_umap(axes[0], cp_emb,  labels, f"CellProfiler (nb={budget})", bg_idx)
@@ -1470,7 +1522,7 @@ def _slide_umap_comparison(prs, budget: str = "150", fold: int = 0, repeat: int 
 
     handles = [mpatches.Patch(color=HIST_COL_AD,   label="adhesion"),
                mpatches.Patch(color=HIST_COL_NOAD, label="No adhesion"),
-               mpatches.Patch(color="#DDDDDD", label="unlabeled")]
+               mpatches.Patch(color="#DDDDDD",      label="unlabeled")]
     axes[2].legend(handles=handles, fontsize=8, loc="lower right", framealpha=0.9)
     fig.tight_layout()
 
@@ -1478,6 +1530,76 @@ def _slide_umap_comparison(prs, budget: str = "150", fold: int = 0, repeat: int 
     _slide_header(slide,
                   f"Embedding: CellProfiler vs ilastik vs SupCon-AE  [nb={budget}]",
                   f"PCA (2D) · DS1 B2 · fold={fold}, repeat={repeat} · pink=adhesion, grey=No adhesion")
+    _add_fig(slide, fig, Inches(0.2), Inches(1.05), Inches(13.0), Inches(6.2))
+
+
+def _slide_umap_4class(prs, budget: str = "150", fold: int = 0, repeat: int = 0):
+    """4-color PCA: ctrl-ad, ctrl-noad, ycomp-ad, ycomp-noad."""
+    ann = pd.read_csv(ANN_B2_CSV)
+    ann["filename"] = ann["filename"].str.replace("-f", "_f", n=1)
+    ann["binary"]   = ann["label"].map(lambda x: "No adhesion" if x == "No adhesion" else "adhesion")
+    ann["cond"]     = ann["filename"].str.split("_f").str[0]   # "control" or "ycomp"
+    ann["cond_disp"]= ann["cond"].map({"control": "ctrl", "ycomp": "ycomp"})
+    ann["class4"]   = ann["cond_disp"] + " · " + ann["binary"]
+    ann_map = dict(zip(ann["filename"], ann["class4"]))
+
+    result = _load_embeddings(budget, fold, repeat)
+    if result is None:
+        return
+    common, cp_emb, il_emb, lat_emb = result
+
+    labels = np.array([ann_map.get(f, "unknown") for f in common])
+
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4.8), facecolor="white")
+    for ax, emb, feat in zip(axes,
+                              [cp_emb, il_emb, lat_emb],
+                              [f"CellProfiler (nb={budget})",
+                               f"ilastik (nb={budget})",
+                               f"SupCon-AE lat=12 (nb={budget})"]):
+        _ax_umap_multiclass(ax, emb, labels, COLORS_4CLASS, feat)
+
+    handles = [mpatches.Patch(color=c, label=l) for l, c in COLORS_4CLASS.items()]
+    handles.append(mpatches.Patch(color="#DDDDDD", label="unlabeled"))
+    axes[2].legend(handles=handles, fontsize=8, loc="lower right", framealpha=0.9)
+    fig.tight_layout()
+
+    slide = _blank(prs)
+    _slide_header(slide,
+                  f"Embedding — 4-Class: Ctrl/Ycomp × Adhesion/No-Adhesion  [nb={budget}]",
+                  f"PCA (2D) · DS1 B2 · fold={fold}, repeat={repeat}")
+    _add_fig(slide, fig, Inches(0.2), Inches(1.05), Inches(13.0), Inches(6.2))
+
+
+def _slide_umap_5class(prs, budget: str = "150", fold: int = 0, repeat: int = 0):
+    """5-color PCA: No adhesion + 4 FA subtypes."""
+    ann = pd.read_csv(ANN_B2_CSV)
+    ann["filename"] = ann["filename"].str.replace("-f", "_f", n=1)
+    ann_map = dict(zip(ann["filename"], ann["label"]))   # raw FA4 label
+
+    result = _load_embeddings(budget, fold, repeat)
+    if result is None:
+        return
+    common, cp_emb, il_emb, lat_emb = result
+
+    labels = np.array([ann_map.get(f, "unknown") for f in common])
+
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4.8), facecolor="white")
+    for ax, emb, feat in zip(axes,
+                              [cp_emb, il_emb, lat_emb],
+                              [f"CellProfiler (nb={budget})",
+                               f"ilastik (nb={budget})",
+                               f"SupCon-AE lat=12 (nb={budget})"]):
+        _ax_umap_multiclass(ax, emb, labels, COLORS_5CLASS, feat)
+
+    handles = [mpatches.Patch(color=c, label=l) for l, c in COLORS_5CLASS.items()]
+    handles.append(mpatches.Patch(color="#DDDDDD", label="unlabeled"))
+    axes[2].legend(handles=handles, fontsize=8, loc="lower right", framealpha=0.9)
+    fig.tight_layout()
+
+    slide = _blank(prs)
+    _slide_header(slide,
+                  f"Embedding — 5-Class: No-Adhesion + FA Subtypes  [nb={budget}]",
+                  f"PCA (2D) · DS1 B2 · fold={fold}, repeat={repeat} · grey=No-adh · blue=focal · orange=nascent · green=complex · purple=fibrillar")
     _add_fig(slide, fig, Inches(0.2), Inches(1.05), Inches(13.0), Inches(6.2))
 
 
@@ -1779,22 +1901,25 @@ def _slide_ds1_b12_lgbm(prs):
     slide = _blank(prs)
     _slide_header(slide,
                   "DS1 B12 — Label Efficiency: SupCon-AE vs CP vs ilastik  [LGBM]",
-                  "vinc ctrl+ycomp · B1+B2 (~2,428 patches) · lat=12/proj=8 · LGBM · 5-fold CV × 5 repeats")
+                  "vinc ctrl+ycomp · B1+B2 (~2,428 patches) · LGBM · 5-fold CV × 5 repeats")
 
-    sc = _summarize(EVAL_DIR / "supcon_le_b12_ds1_lat12p8_ds1.csv", BUDGETS_B12)
-    cp = _summarize(EVAL_DIR / "cp_b12_ds1.csv",                    BUDGETS_B12)
-    il = _summarize(EVAL_DIR / "ilastik_b12_ds1.csv",               BUDGETS_B12)
+    sc12 = _summarize(EVAL_DIR / "supcon_le_b12_ds1_lat12p8_ds1.csv",  BUDGETS_B12_FULL)
+    sc64 = _summarize(EVAL_DIR / "supcon_le_b12_ds1_lat64p32_ds1.csv", BUDGETS_B12_FULL)
+    cp   = _summarize(EVAL_DIR / "cp_b12_ds1.csv",                     BUDGETS_B12_FULL)
+    il   = _summarize(EVAL_DIR / "ilastik_b12_ds1.csv",                BUDGETS_B12_FULL)
 
     datasets = [
         dict(label="SupCon-AE (lat=12, proj=8)",
-             color=COL_SUPCON,  mean=sc["mean"].values, std=sc["std"].values),
+             color=COL_SUPCON,   mean=sc12["mean"].values, std=sc12["std"].values),
+        dict(label="SupCon-AE (lat=64, proj=32)",
+             color=COL_SUPCON64, mean=sc64["mean"].values, std=sc64["std"].values),
         dict(label="CellProfiler",
-             color=COL_CP,      mean=cp["mean"].values, std=cp["std"].values),
+             color=COL_CP,       mean=cp["mean"].values,   std=cp["std"].values),
         dict(label="ilastik",
-             color=COL_ILASTIK, mean=il["mean"].values, std=il["std"].values),
+             color=COL_ILASTIK,  mean=il["mean"].values,   std=il["std"].values),
     ]
 
-    fig = _fig_le_curves(datasets, BUDGETS_B12,
+    fig = _fig_le_curves(datasets, BUDGETS_B12_FULL,
                          "DS1 B12 · Balanced Accuracy vs Label Budget (LGBM)")
     _add_fig(slide, fig, PLOT_LEFT, PLOT_TOP, PLOT_W, PLOT_H)
     _add_info_panel(slide, _DS1_B12_SECTIONS)
@@ -1804,22 +1929,25 @@ def _slide_ds1_b12_logreg(prs):
     slide = _blank(prs)
     _slide_header(slide,
                   "DS1 B12 — Label Efficiency: SupCon-AE vs CP vs ilastik  [Logreg]",
-                  "vinc ctrl+ycomp · B1+B2 (~2,428 patches) · lat=12/proj=8 · logistic regression · 5-fold CV × 5 repeats")
+                  "vinc ctrl+ycomp · B1+B2 (~2,428 patches) · logistic regression · 5-fold CV × 5 repeats")
 
-    sc = _summarize(EVAL_DIR / "supcon_le_b12_ds1_lat12p8_logreg_ds1.csv", BUDGETS_B12)
-    cp = _summarize(EVAL_DIR / "cp_b12_logreg_ds1.csv",                    BUDGETS_B12)
-    il = _summarize(EVAL_DIR / "ilastik_b12_logreg_ds1.csv",               BUDGETS_B12)
+    sc12 = _summarize(EVAL_DIR / "supcon_le_b12_ds1_lat12p8_logreg_ds1.csv",  BUDGETS_B12_FULL)
+    sc64 = _summarize(EVAL_DIR / "supcon_le_b12_ds1_lat64p32_logreg_ds1.csv", BUDGETS_B12_FULL)
+    cp   = _summarize(EVAL_DIR / "cp_b12_logreg_ds1.csv",                     BUDGETS_B12_FULL)
+    il   = _summarize(EVAL_DIR / "ilastik_b12_logreg_ds1.csv",                BUDGETS_B12_FULL)
 
     datasets = [
         dict(label="SupCon-AE (lat=12, proj=8)",
-             color=COL_SUPCON,  mean=sc["mean"].values, std=sc["std"].values),
+             color=COL_SUPCON,   mean=sc12["mean"].values, std=sc12["std"].values),
+        dict(label="SupCon-AE (lat=64, proj=32)",
+             color=COL_SUPCON64, mean=sc64["mean"].values, std=sc64["std"].values),
         dict(label="CellProfiler",
-             color=COL_CP,      mean=cp["mean"].values, std=cp["std"].values),
+             color=COL_CP,       mean=cp["mean"].values,   std=cp["std"].values),
         dict(label="ilastik",
-             color=COL_ILASTIK, mean=il["mean"].values, std=il["std"].values),
+             color=COL_ILASTIK,  mean=il["mean"].values,   std=il["std"].values),
     ]
 
-    fig = _fig_le_curves(datasets, BUDGETS_B12,
+    fig = _fig_le_curves(datasets, BUDGETS_B12_FULL,
                          "DS1 B12 · Balanced Accuracy vs Label Budget (Logreg)")
     _add_fig(slide, fig, PLOT_LEFT, PLOT_TOP, PLOT_W, PLOT_H)
     _add_info_panel(slide, _DS1_B12_SECTIONS)
@@ -1883,6 +2011,205 @@ def _slide_b2_vs_b12_lgbm(prs):
     _add_info_panel(slide, _B2_VS_B12_SECTIONS)
 
 
+BUDGETS_B1B2 = [10, 20, 25, 50, 75, 100, 150, 200]
+
+_B1B2_SECTIONS = {
+    "Dataset": [
+        "DS1: vinc (vincristine)",
+        "Conditions: ctrl + ycomp",
+        "327 B1 + 327 B2 patches (matched)",
+        "Same raw images, same patch coords",
+    ],
+    "Labels": [
+        "B1: Margaret (~2026-06, internal)",
+        "B2: Annabel  (2026-08, systematic)",
+        "Binary: adhesion / No adhesion",
+        "Matched set: same patches relabelled",
+    ],
+    "Evaluation": [
+        "5-fold stratified CV × 5 repeats",
+        "Budget: 10–200 patches (8 levels)",
+        "Classifier: LightGBM (LGBM)",
+        "Metric: balanced accuracy",
+        "Test: held-out fold (excl. train)",
+    ],
+    "Features": [
+        "CellProfiler: 56-dim (intensity +",
+        "  texture Haralick/GLCM)",
+        "ilastik: pixel feature stack",
+        "  (Gaussian, LoG, gradient, etc.)",
+    ],
+    "Key finding": [
+        "B2 > B1 by +0.17–0.20 bal acc",
+        "at EVERY budget",
+        "→ label quality dominates",
+        "→ not features, not image pool",
+    ],
+}
+
+
+def _slide_b1b2_label_quality(prs):
+    slide = _blank(prs)
+    _slide_header(
+        slide,
+        "Label Quality: Annotator B2 vs B1 (same images, same features)",
+        "327 matched patches · LGBM · 5-fold CV × 5 repeats · B1 = Margaret, B2 = Annabel",
+    )
+
+    cp_b1 = _summarize(EVAL_DIR / "cp_b1b2_b1_ds1.csv", BUDGETS_B1B2)
+    cp_b2 = _summarize(EVAL_DIR / "cp_b1b2_b2_ds1.csv", BUDGETS_B1B2)
+    il_b1 = _summarize(EVAL_DIR / "il_b1b2_b1_ds1.csv", BUDGETS_B1B2)
+    il_b2 = _summarize(EVAL_DIR / "il_b1b2_b2_ds1.csv", BUDGETS_B1B2)
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.5, 5.6), facecolor="white")
+    x = np.arange(len(BUDGETS_B1B2))
+    xlabels = [str(b) for b in BUDGETS_B1B2]
+
+    for ax, (b1, b2, feat_name, color) in zip(axes, [
+        (cp_b1, cp_b2, "CellProfiler",  COL_CP),
+        (il_b1, il_b2, "ilastik",        COL_ILASTIK),
+    ]):
+        m1, s1 = b1["mean"].values * 100, b1["std"].values * 100
+        m2, s2 = b2["mean"].values * 100, b2["std"].values * 100
+
+        # Shade gap region
+        ax.fill_between(x, m1, m2, color=color, alpha=0.10, zorder=0)
+
+        # B1 dashed
+        ax.plot(x, m1, color=color, linewidth=2.0, linestyle="--",
+                marker="o", markersize=4.5, label="B1 (Margaret)", alpha=0.75)
+        ax.fill_between(x, m1 - s1, m1 + s1, color=color, alpha=0.08)
+
+        # B2 solid
+        ax.plot(x, m2, color=color, linewidth=2.2, linestyle="-",
+                marker="o", markersize=5, label="B2 (Annabel)")
+        ax.fill_between(x, m2 - s2, m2 + s2, color=color, alpha=0.12)
+
+        # Annotate gap at last budget
+        gap = m2[-1] - m1[-1]
+        ax.annotate(
+            f"Δ={gap:.1f}%",
+            xy=(x[-1], (m1[-1] + m2[-1]) / 2),
+            xytext=(x[-1] - 0.6, (m1[-1] + m2[-1]) / 2 + 2),
+            fontsize=9, color="#555555",
+            arrowprops=dict(arrowstyle="-", color="#aaaaaa", lw=0.8),
+        )
+
+        ax.axhline(95, color="#888888", linestyle="--", linewidth=1.0, alpha=0.7, zorder=0)
+        ax.text(len(BUDGETS_B1B2) - 0.1, 95.6, "95 %",
+                color="#888888", fontsize=8, ha="right", va="bottom")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(xlabels, fontsize=9)
+        ax.set_xlabel("Label budget (n patches)", fontsize=10)
+        ax.set_ylabel("Balanced accuracy (%)", fontsize=10)
+        ax.set_ylim(42, 102)
+        ax.legend(fontsize=9.5, framealpha=0.9, loc="lower right")
+        ax.set_title(f"{feat_name} features · B1 vs B2 labels",
+                     fontsize=10.5, fontweight="bold", pad=6)
+        ax.set_facecolor("white")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.grid(axis="y", color="#EEEEEE", linewidth=0.7)
+
+    fig.suptitle("Label quality drives performance — B2 labels are consistently +0.17–0.20 bal acc better",
+                 fontsize=10.5, color=C_BODY, y=1.01)
+    fig.tight_layout()
+
+    _add_fig(slide, fig, PLOT_LEFT, PLOT_TOP, PLOT_W, PLOT_H)
+    _add_info_panel(slide, _B1B2_SECTIONS)
+
+
+def _slide_b1b2_cnn_vs_features(prs):
+    """CNN EfficientNet-B0 vs handcrafted features on B1 & B2 matched sets."""
+    cnn_b1_path = EVAL_DIR / "cnn_b1b2_b1_ds1.csv"
+    cnn_b2_path = EVAL_DIR / "cnn_b1b2_b2_ds1.csv"
+
+    slide = _blank(prs)
+    _slide_header(
+        slide,
+        "Direct CNN Classifier (EfficientNet-B0) vs Feature-Based Methods",
+        "B1/B2 matched set · 32×32 patches → 64×64 · 100 epochs · no pre-training on unlabeled data",
+    )
+
+    # Gather data — skip curve if CSV missing or has <10 rows
+    def _try_summarize(path):
+        if not Path(path).exists():
+            return None
+        df = pd.read_csv(path)
+        if len(df) < 10:
+            return None
+        return _summarize(path, BUDGETS_B1B2)
+
+    cnn_b1 = _try_summarize(cnn_b1_path)
+    cnn_b2 = _try_summarize(cnn_b2_path)
+    cp_b2  = _summarize(EVAL_DIR / "cp_b1b2_b2_ds1.csv",  BUDGETS_B1B2)
+    il_b2  = _summarize(EVAL_DIR / "il_b1b2_b2_ds1.csv",  BUDGETS_B1B2)
+
+    COL_CNN = "#9467bd"   # purple for CNN
+
+    fig, ax = plt.subplots(figsize=(8.5, 5.6), facecolor="white")
+    x = np.arange(len(BUDGETS_B1B2))
+
+    for vals, color, label, ls in [
+        (cp_b2,  COL_CP,      "CellProfiler + LGBM (B2)", "-"),
+        (il_b2,  COL_ILASTIK, "ilastik + LGBM (B2)",      "-"),
+        (cnn_b2, COL_CNN,     "EfficientNet-B0 (B2, direct)", "-"),
+        (cnn_b1, COL_CNN,     "EfficientNet-B0 (B1, direct)", "--"),
+    ]:
+        if vals is None:
+            continue
+        m, s = vals["mean"].values * 100, vals["std"].values * 100
+        valid = ~np.isnan(m)
+        ax.plot(x[valid], m[valid], color=color, linewidth=2.2,
+                linestyle=ls, marker="o", markersize=5, label=label)
+        ax.fill_between(x[valid], m[valid] - s[valid], m[valid] + s[valid],
+                        color=color, alpha=0.10)
+
+    if cnn_b1 is None or cnn_b2 is None:
+        ax.text(0.5, 0.5, "CNN results pending\n(GPU jobs submitted — ~1–2 h)",
+                transform=ax.transAxes, ha="center", va="center",
+                fontsize=13, color="#888888",
+                bbox=dict(boxstyle="round", fc="#f5f5f5", ec="#cccccc"))
+
+    ax.axhline(95, color="#888888", linestyle="--", linewidth=1.0, alpha=0.7, zorder=0)
+    ax.text(len(BUDGETS_B1B2) - 0.1, 95.6, "95 %",
+            color="#888888", fontsize=8, ha="right", va="bottom")
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(b) for b in BUDGETS_B1B2], fontsize=9)
+    ax.set_xlabel("Label budget (n patches)", fontsize=11)
+    ax.set_ylabel("Balanced accuracy (%)", fontsize=11)
+    ax.set_ylim(42, 102)
+    ax.legend(fontsize=9.5, framealpha=0.9, loc="lower right")
+    ax.set_title("CNN vs feature-based classifiers · B1/B2 matched set",
+                 fontsize=11, fontweight="bold", pad=8)
+    ax.set_facecolor("white")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="y", color="#EEEEEE", linewidth=0.7)
+    fig.tight_layout()
+
+    _add_fig(slide, fig, PLOT_LEFT, PLOT_TOP, PLOT_W, PLOT_H)
+
+    cnn_note = "GPU jobs submitted (1609536/37)" if (cnn_b1 is None or cnn_b2 is None) \
+               else "Complete"
+    _add_info_panel(slide, {
+        "CNN architecture": [
+            "EfficientNet-B0 (timm, pretrained)",
+            "First conv adapted: 3-ch → 1-ch",
+            "Resize 32→64, 100 epochs",
+            "Adam lr=5e-4, cosine LR decay",
+            "Augment: H/V flip + rot90",
+        ],
+        "Key comparison": [
+            "CNN: trains on labeled patches only",
+            "CP/ilastik: hand-engineered features",
+            "No unsupervised pre-training for CNN",
+            "→ shows value of label quality",
+            "→ vs. feature representation",
+        ],
+        "Status": [f"CNN results: {cnn_note}"],
+    })
+
+
 def _slide_ds2_b12_lgbm_lat64(prs):
     slide = _blank(prs)
     _slide_header(slide,
@@ -1931,6 +2258,149 @@ def _slide_ds2_b12_logreg(prs):
                          "DS2 B12 · Balanced Accuracy vs Label Budget (Logreg)")
     _add_fig(slide, fig, PLOT_LEFT, PLOT_TOP, PLOT_W, PLOT_H)
     _add_info_panel(slide, _DS2_B12_SECTIONS)
+
+
+def _slide_ds1_b12_fa4_perclass(prs):
+    """Per-class F1 vs label budget for 5-class FA classification (SupCon/CP/ilastik)."""
+    sc_path = EVAL_DIR / "le_b12_fa4_perclass_supcon_ds1.csv"
+    cp_path = EVAL_DIR / "le_b12_fa4_perclass_cp_ds1.csv"
+    il_path = EVAL_DIR / "le_b12_fa4_perclass_il_ds1.csv"
+
+    if not sc_path.exists():
+        print("  FA4 per-class eval CSV not found, skipping slide", flush=True)
+        return
+
+    slide = _blank(prs)
+    _slide_header(slide,
+                  "DS1 B12 — FA Subtype Per-Class F1 vs Label Budget  [LGBM]",
+                  "5-class: No adhesion · focal adhesion · Nascent Adhesion · focal complex · fibrillar adhesion")
+
+    budgets = BUDGETS_B12_FULL
+    x       = np.arange(len(budgets))
+    xlabels = [str(b) for b in budgets]
+
+    fa4_classes = list(COLORS_5CLASS.keys())
+
+    fig, axes = plt.subplots(1, 3, figsize=(13, 5.0), facecolor="white")
+    panels = [
+        (sc_path, "SupCon-AE (B12, lat=12)"),
+        (cp_path, "CellProfiler"),
+        (il_path, "ilastik"),
+    ]
+
+    for ax, (path, method_label) in zip(axes, panels):
+        if not Path(path).exists():
+            ax.set_visible(False)
+            continue
+        df = pd.read_csv(path)
+        num = df[df["budget"] != "all"].copy()
+        num["budget_int"] = num["budget"].astype(int)
+
+        for cls in fa4_classes:
+            col_name = f"f1_{cls}"
+            if col_name not in num.columns:
+                continue
+            s = num.groupby("budget_int")[col_name].agg(["mean", "std"]).reindex(budgets)
+            m  = s["mean"].values
+            sd = s["std"].values
+            valid = ~np.isnan(m)
+            color = COLORS_5CLASS[cls]
+            ax.plot(x[valid], m[valid] * 100,
+                    color=color, linewidth=2.0, marker="o", markersize=4, label=cls)
+            ax.fill_between(x[valid],
+                            (m[valid] - sd[valid]) * 100,
+                            (m[valid] + sd[valid]) * 100,
+                            color=color, alpha=0.10)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(xlabels, fontsize=7, rotation=45, ha="right")
+        ax.set_xlabel("Label budget", fontsize=9)
+        ax.set_ylabel("F1 score (%)", fontsize=9)
+        ax.set_ylim(-2, 102)
+        ax.set_title(method_label, fontsize=10, fontweight="bold")
+        ax.legend(fontsize=7.5, framealpha=0.9, loc="lower right")
+        ax.set_facecolor("white")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.grid(axis="y", color="#EEEEEE", linewidth=0.7)
+
+    fig.suptitle("Per-Class F1 · DS1 B12 FA Types · 5-fold CV × 5 repeats",
+                 fontsize=11, fontweight="bold", y=1.02)
+    fig.tight_layout(pad=1.5)
+    _add_fig(slide, fig, Inches(0.2), Inches(1.05), Inches(13.0), Inches(6.2))
+
+
+def _slide_ds1_b12_ctrl_vs_ycomp(prs):
+    """Ctrl vs ycomp classification accuracy — adhesion and no-adhesion subsets."""
+    slide = _blank(prs)
+    _slide_header(slide,
+                  "DS1 B12 — Ctrl vs Ycomp Classification: Adhesion vs No-Adhesion Patches  [LGBM]",
+                  "Using the same SupCon-AE latents (B12, lat=12) — classifier trained on condition labels, not ad/no-ad")
+
+    sc_path = EVAL_DIR / "le_b12_ctrlvy_supcon_ds1.csv"
+    cp_path = EVAL_DIR / "le_b12_ctrlvy_cp_ds1.csv"
+    il_path = EVAL_DIR / "le_b12_ctrlvy_il_ds1.csv"
+
+    budgets = BUDGETS_B12_FULL
+    x       = np.arange(len(budgets))
+    xlabels = [str(b) for b in budgets]
+
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 5.5), facecolor="white")
+
+    for ax, subset, title_tag in zip(
+        axes,
+        ["ad", "noad"],
+        ["Adhesion patches only", "No-adhesion patches only"],
+    ):
+        for path, color, label in [
+            (sc_path, COL_SUPCON,  "SupCon-AE (B12, lat=12)"),
+            (cp_path, COL_CP,      "CellProfiler"),
+            (il_path, COL_ILASTIK, "ilastik"),
+        ]:
+            if not Path(path).exists():
+                continue
+            s = _summarize_ctrlvy(path, subset, budgets)
+            m = s["mean"].values
+            sd = s["std"].values
+            valid = ~np.isnan(m)
+            ax.plot(x[valid], m[valid] * 100,
+                    color=color, linewidth=2.2, marker="o", markersize=5, label=label)
+            ax.fill_between(x[valid],
+                            (m[valid] - sd[valid]) * 100,
+                            (m[valid] + sd[valid]) * 100,
+                            color=color, alpha=0.12)
+
+        ax.axhline(95, color="#888888", linestyle="--", linewidth=1.2, alpha=0.75, zorder=0)
+        ax.text(len(budgets) - 0.08, 95.5, "95 %",
+                color="#888888", fontsize=8, ha="right", va="bottom")
+        ax.set_xticks(x)
+        ax.set_xticklabels(xlabels, fontsize=8, rotation=45, ha="right")
+        ax.set_xlabel("Label budget (n patches)", fontsize=10)
+        ax.set_ylabel("Balanced accuracy — ctrl vs ycomp (%)", fontsize=10)
+        ax.set_ylim(42, 102)
+        ax.legend(fontsize=9, framealpha=0.9, loc="lower right")
+        ax.set_facecolor("white")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.set_title(title_tag, fontsize=11, fontweight="bold", pad=8)
+        ax.grid(axis="y", color="#EEEEEE", linewidth=0.7)
+
+    fig.suptitle("Ctrl vs Ycomp Classification · DS1 B12 · LGBM · 5-fold CV × 5 repeats",
+                 fontsize=11, fontweight="bold", y=1.01)
+    fig.tight_layout(pad=1.5)
+
+    _add_fig(slide, fig, Inches(0.3), PLOT_TOP, Inches(9.2), PLOT_H)
+
+    _bullet_box(slide,
+        Inches(9.7), PANEL_TOP, Inches(3.3), PANEL_H,
+        "Interpretation",
+        ["Classification task: ctrl (0) vs ycomp (1)",
+         "SupCon trained on ad/no-ad labels — not condition",
+         "Curves show whether latents capture condition info",
+         "as ad/no-ad supervision budget increases",
+         "CP and ilastik are budget-independent baselines",
+         "(LGBM trained on same budget subset each time)",
+         "Ad subset: 445 ctrl / 569 ycomp in training pool",
+         "No-ad subset: 437 ctrl / 977 ycomp (imbalanced)"],
+        header_color=C_ACCENT, bullet_size=10)
 
 
 def _slide_appendix_divider(prs):
@@ -1989,10 +2459,18 @@ def build_pptx(out_path: Path):
     _slide_supcon_top_features(prs, budget="750")
 
     # ---- UMAP comparison ----
-    print("  Slide 18 — UMAP comparison: nb=150")
+    print("  Slide 18a — UMAP comparison: nb=150 (ad/noad 2-color)")
     _slide_umap_comparison(prs, budget="150")
-    print("  Slide 19 — UMAP comparison: nb=750")
+    print("  Slide 18b — UMAP 4-class: nb=150 (ctrl/ycomp × ad/noad)")
+    _slide_umap_4class(prs, budget="150")
+    print("  Slide 18c — UMAP 5-class: nb=150 (noad + FA subtypes)")
+    _slide_umap_5class(prs, budget="150")
+    print("  Slide 19a — UMAP comparison: nb=750 (ad/noad 2-color)")
     _slide_umap_comparison(prs, budget="750")
+    print("  Slide 19b — UMAP 4-class: nb=750 (ctrl/ycomp × ad/noad)")
+    _slide_umap_4class(prs, budget="750")
+    print("  Slide 19c — UMAP 5-class: nb=750 (noad + FA subtypes)")
+    _slide_umap_5class(prs, budget="750")
 
     # ---- Benchmark results (LGBM) ----
     print("  Slide 20a — DS1 B2 design")
@@ -2004,11 +2482,20 @@ def build_pptx(out_path: Path):
     _slide_ds1_b12_design(prs)
     print("  Slide 21b — DS1 B12 LGBM")
     _slide_ds1_b12_lgbm(prs)
+    print("  Slide 21c — DS1 B12 FA subtype per-class F1 curves")
+    _slide_ds1_b12_fa4_perclass(prs)
+    print("  Slide 21d — DS1 B12 ctrl vs ycomp (ad/noad subsets)")
+    _slide_ds1_b12_ctrl_vs_ycomp(prs)
 
     print("  Slide 22a — B2 vs B12 design")
     _slide_b2_vs_b12_design(prs)
     print("  Slide 22b — B2 vs B12 LGBM")
     _slide_b2_vs_b12_lgbm(prs)
+
+    print("  Slide 22c — B1 vs B2 label quality (CP + ilastik)")
+    _slide_b1b2_label_quality(prs)
+    print("  Slide 22d — CNN EfficientNet-B0 vs feature-based (B1/B2)")
+    _slide_b1b2_cnn_vs_features(prs)
 
     print("  Slide 23 — DS2 B12 LGBM")
     _slide_ds2_b12_lgbm_lat64(prs)

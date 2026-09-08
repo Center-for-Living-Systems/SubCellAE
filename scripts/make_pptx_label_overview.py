@@ -23,7 +23,10 @@ Output: results/label_overview.pptx
 """
 from __future__ import annotations
 
+import csv as _csv_mod
 import io
+import random as _random
+import re
 from pathlib import Path
 
 import matplotlib
@@ -1060,6 +1063,558 @@ def _slide_images_per_batch(prs, b1_dfs, b2_dfs, batch: int):
 
 
 # ---------------------------------------------------------------------------
+# QC Summary (ported + updated from FA_label_QC_summary.py)
+# ---------------------------------------------------------------------------
+_QC_H5_BASE = Path("/net/projects/CLS/lding/data/fa_data_analysis/ae_results/patches/cio_rb")
+
+
+class _PatchStore:
+    """Load patches/raw from HDF5 and look up by filename."""
+    def __init__(self, h5_path):
+        try:
+            import h5py
+        except ImportError:
+            raise ImportError("h5py required for QC patch slides: pip install h5py")
+        with h5py.File(h5_path, "r") as f:
+            meta_text = f["meta/csv"][()].decode()
+            self.patches = f["patches/raw"][:]
+        rows = list(_csv_mod.DictReader(io.StringIO(meta_text)))
+        self.fn_to_idx = {r["filename"]: int(i) for i, r in enumerate(rows)}
+
+    def get(self, filename, scale=3):
+        idx = self.fn_to_idx.get(filename)
+        if idx is None:
+            return None
+        patch = self.patches[idx].astype(float)
+        p1, p99 = np.percentile(patch, 2), np.percentile(patch, 99)
+        normed = np.clip((patch - p1) / max(p99 - p1, 1e-8), 0, 1)
+        ps = patch.shape[0]
+        return Image.fromarray((normed * 255).astype(np.uint8)).resize(
+            (ps * scale, ps * scale), Image.NEAREST)
+
+
+class _MultiStore:
+    def __init__(self, *stores):
+        self.stores = stores
+
+    def get(self, filename, scale=3):
+        for s in self.stores:
+            img = s.get(filename, scale)
+            if img is not None:
+                return img
+        return None
+
+
+def _uid_to_h5fn(uid: str) -> str:
+    """Convert B1 uid 'control-f0000...' → H5 filename 'control_f0000...'."""
+    for cond in ("control", "ycomp"):
+        if uid.startswith(cond + "-"):
+            return cond + "_" + uid[len(cond) + 1:]
+    return uid
+
+
+def _load_qc_data():
+    """Return (vinc_df, pfak_df, pfak_conflicts, ppax_df) using latest label files."""
+    vinc = pd.read_csv(LAB / "vinc_combined_label_Annabel_20260816.csv")
+    ppax = pd.read_csv(LAB / "ppax_combined_label_Ernest_latest.csv")
+    pfak_apr = pd.read_csv(LAB / "pfak_labels_Annabel_20260427_1035.csv")
+    pfak_aug = pd.read_csv(LAB / "pfak_combined_label_Annabel_aug2026.csv")
+    both = pfak_apr.merge(pfak_aug, on="filename", suffixes=("_apr", "_aug"))
+    pfak_conflicts = [
+        (row["filename"], row["label_apr"], row["label_aug"])
+        for _, row in both[both["label_apr"] != both["label_aug"]].iterrows()
+    ]
+    pfak = pd.concat([pfak_apr, pfak_aug]).drop_duplicates(subset=["filename"], keep="last")
+    return vinc, pfak, pfak_conflicts, ppax
+
+
+def _fig_patch_grid(rows, label_order, store, n_per_row=8, seed=42):
+    """Return PIL image: patch grid with one row per label, n_per_row columns."""
+    rng = _random.Random(seed)
+    by_label: dict = {}
+    for r in rows:
+        lbl = r.get("label") or r.get("classification", "")
+        by_label.setdefault(lbl, []).append(r)
+    labels = [l for l in label_order if l in by_label]
+    if not labels:
+        fig, ax = plt.subplots(figsize=(3, 1))
+        ax.text(0.5, 0.5, "no data", ha="center", va="center")
+        ax.axis("off")
+        return _fig_to_pil(fig)
+
+    sampled = {}
+    for lbl in labels:
+        pool = list(by_label[lbl])
+        rng.shuffle(pool)
+        sampled[lbl] = pool
+
+    fig, axes = plt.subplots(len(labels), n_per_row,
+                              figsize=(n_per_row * 0.88, len(labels) * 1.05))
+    if len(labels) == 1:
+        axes = axes[np.newaxis, :]
+
+    for ri, lbl in enumerate(labels):
+        pool = sampled[lbl]
+        for ci in range(n_per_row):
+            ax = axes[ri, ci]
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for sp in ax.spines.values():
+                sp.set_linewidth(0.4)
+                sp.set_edgecolor(FA5_COLORS.get(lbl, "#bbb"))
+            if ci < len(pool):
+                img = store.get(pool[ci]["filename"])
+                if img is not None:
+                    ax.imshow(np.array(img), cmap="gray", vmin=0, vmax=255)
+                    continue
+            ax.set_facecolor("#ececec")
+            ax.imshow(np.zeros((32, 32)), cmap="gray", vmin=0, vmax=255)
+        axes[ri, 0].set_ylabel(
+            f"{FA5_SHORT.get(lbl, lbl)}\nn={len(pool)}",
+            fontsize=7, rotation=0, labelpad=36, ha="right", va="center",
+            color=FA5_COLORS.get(lbl, "#555"))
+
+    fig.subplots_adjust(wspace=0.02, hspace=0.06, left=0.15, right=0.99, top=0.99, bottom=0.01)
+    return _fig_to_pil(fig)
+
+
+def _fig_conflict_patches(conflicts, store):
+    """Return PIL showing each conflict: patch image + earlier→later label."""
+    n = len(conflicts)
+    n_cols = min(n, 3)
+    n_rows = (n + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols,
+                              figsize=(n_cols * 2.1, n_rows * 2.4),
+                              squeeze=False)
+    for i, (fn, lbl_early, lbl_late) in enumerate(conflicts):
+        ri, ci = divmod(i, n_cols)
+        ax = axes[ri][ci]
+        img = store.get(fn)
+        if img is not None:
+            ax.imshow(np.array(img), cmap="gray", vmin=0, vmax=255)
+        else:
+            ax.set_facecolor("#ddd")
+        m = re.search(r"f\d+x\d+y\d+", fn)
+        ax.set_title(m.group(0) if m else fn, fontsize=7, color="#555")
+        ax.set_xlabel(f"{lbl_early}\n→ {lbl_late}", fontsize=7.5, color="#c0392b", labelpad=2)
+        ax.set_xticks([])
+        ax.set_yticks([])
+    for i in range(n, n_rows * n_cols):
+        axes[divmod(i, n_cols)[0]][divmod(i, n_cols)[1]].axis("off")
+    fig.suptitle("Earlier label → Latest label  (latest used)", fontsize=8, color="#555")
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    return _fig_to_pil(fig)
+
+
+def _slide_qc_overview(prs, vinc, pfak, pfak_conflicts, ppax):
+    """QC Overview: session table, label legend, output files."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _header(slide,
+            "Label QC Summary — Batch 2 (Prototype Interface)",
+            subtitle=("Dataset 1: Annabel · vinc · ctrl + ycomp  ·  "
+                      "Dataset 2: Annabel · pfak · ctrl  ·  "
+                      "Dataset 3: Ernest · ppax · ctrl"))
+
+    cols  = ["Dataset", "Annotator", "Sessions", "Date range", "# Patches", "# Conflicts"]
+    col_x = [0.25, 2.0, 3.4, 4.65, 6.95, 8.75]
+    col_w = [1.70, 1.35, 1.2, 2.25, 1.75, 1.55]
+    hdr_y = 1.25
+    _rect(slide, 0.2, hdr_y - 0.04, SLIDE_W - 0.4, 0.35, "#2c3e50")
+    for cx, cw, ch in zip(col_x, col_w, cols):
+        _txt(slide, ch, cx, hdr_y, cw, 0.3, size=9, bold=True, color="#ffffff")
+
+    n_pfak_conf = len(pfak_conflicts)
+    data_rows = [
+        ("ds1", DS_SHORT["ds1"], "Annabel", "21", "Jul–Aug 2026",
+         f"{len(vinc):,}", "0"),
+        ("ds2", DS_SHORT["ds2"], "Annabel", "5",  "Apr–Aug 2026",
+         f"{len(pfak):,}", f"{n_pfak_conf} ⚠" if n_pfak_conf else "0"),
+        ("ds3", DS_SHORT["ds3"], "Ernest",  "2",  "Jul–Aug 2026",
+         f"{len(ppax):,}", "0"),
+    ]
+    for ri, (ds_key, ds_name, ann, nsess, dates, npatch, nconf) in enumerate(data_rows):
+        row_y = hdr_y + 0.35 + ri * 0.52
+        bg = "#f5f5f5" if ri % 2 == 0 else "#ffffff"
+        _rect(slide, 0.2, row_y - 0.04, SLIDE_W - 0.4, 0.48, bg)
+        _rect(slide, 0.2, row_y - 0.04, 0.06, 0.48, DS_COLORS.get(ds_key, "#888"))
+        for cx, cw, v in zip(col_x, col_w, [ds_name, ann, nsess, dates, npatch, nconf]):
+            _txt(slide, v, cx + 0.06, row_y, cw, 0.42, size=9,
+                 color="#c0392b" if "⚠" in str(v) else "#222222")
+
+    # Label legend
+    _txt(slide, "Label categories", 0.25, 3.42, 12, 0.28, size=10, bold=True, color="#2c3e50")
+    lx = 0.3
+    for cls in FA5_ORDER:
+        _rect(slide, lx, 3.78, 0.20, 0.22, FA5_COLORS[cls])
+        _txt(slide, cls, lx + 0.26, 3.76, 2.3, 0.28, size=8.5, color="#222222")
+        lx += 2.56
+
+    # Output files box
+    _rect(slide, 0.2, 4.34, SLIDE_W - 0.4, 2.9, "#eaf2fb")
+    _txt(slide, "Updated label files", 0.35, 4.40, 12, 0.28, size=10, bold=True, color="#2c3e50")
+    file_lines = [
+        ("ds1", "vinc_combined_label_Annabel_20260816.csv  —  1,224 patches, 0 conflicts"),
+        ("ds2", f"pfak Apr+Aug combined: {len(pfak):,} patches, {n_pfak_conf} conflict(s)  ·  "
+                "Aug-only (no conflicts): pfak_combined_label_Annabel_aug2026.csv (211)"),
+        ("ds3", "ppax_combined_label_Ernest_latest.csv  —  261 patches, 0 conflicts (available sessions)"),
+    ]
+    fy = 4.80
+    for ds_key, desc in file_lines:
+        _rect(slide, 0.35, fy, 0.58, 0.24, DS_COLORS[ds_key])
+        _txt(slide, DS_SHORT[ds_key], 0.37, fy + 0.02, 0.56, 0.22, size=7.5,
+             bold=True, color="#ffffff", align=PP_ALIGN.CENTER)
+        _txt(slide, desc, 1.0, fy + 0.02, 12.0, 0.24, size=8.5, color="#444444")
+        fy += 0.34
+    if n_pfak_conf:
+        _txt(slide,
+             f"⚠  {n_pfak_conf} Dataset 2 conflict(s): Apr 2026 vs Aug 2026 label changed — Aug label retained in combined file",
+             0.35, fy + 0.06, SLIDE_W - 0.55, 0.28, size=9, bold=True, color="#c0392b")
+
+
+def _slide_qc_ds(prs, ds_key, ds_name, annotator, date_range, df,
+                 store, conflicts=None, label_col="label"):
+    """One QC slide: label distribution bar chart + sample patches or conflict patches."""
+    n_conf = len(conflicts) if conflicts else 0
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _header(slide,
+            f"{ds_name} — QC: Label Distribution & {'Conflict Patches' if n_conf else 'Sample Patches'}",
+            subtitle=(f"Annotator: {annotator}  ·  {date_range}  ·  {len(df):,} patches  ·  "
+                      f"{'0 conflicts' if not n_conf else f'{n_conf} ⚠ conflict(s) shown'}"))
+
+    # Left: horizontal bar chart
+    dist = df[label_col].value_counts()
+    labels_present = [l for l in FA5_ORDER if l in dist.index]
+    fig_dist, ax = plt.subplots(figsize=(5.0, len(labels_present) * 0.72 + 0.8))
+    total = len(df)
+    for yi, lbl in enumerate(labels_present):
+        cnt = int(dist.get(lbl, 0))
+        ax.barh(yi, cnt / total, color=FA5_COLORS.get(lbl, "#999"), height=0.55)
+        ax.text(cnt / total + 0.01, yi, f"{cnt:,}  ({100*cnt/total:.0f}%)",
+                va="center", fontsize=9, color="#333")
+    ax.set_yticks(range(len(labels_present)))
+    ax.set_yticklabels([FA5_SHORT.get(l, l) for l in labels_present], fontsize=9)
+    ax.set_xlim(0, 1.15)
+    ax.set_xlabel("fraction of all patches", fontsize=8)
+    ax.set_title(f"Label distribution  (n={total:,})", fontsize=10, fontweight="bold",
+                 color=DS_COLORS.get(ds_key, "#333"))
+    ax.spines[["top", "right"]].set_visible(False)
+    fig_dist.tight_layout()
+    chart_h = min(5.6, len(labels_present) * 0.95 + 1.2)
+    _paste_pil(slide, _fig_to_pil(fig_dist), 0.3, 1.1, 6.0, chart_h)
+
+    # Right: conflict patches or sample patch grid
+    if n_conf:
+        _txt(slide, "⚠  Conflicting patches  (earlier → later label)",
+             6.8, 1.1, 6.2, 0.32, size=10, bold=True, color="#c0392b")
+        fig_conf = _fig_conflict_patches(conflicts, store)
+        _paste_pil(slide, fig_conf, 6.8, 1.5, 6.2, 5.8)
+    else:
+        _txt(slide, "Sample patches per label  (8 random per class)",
+             6.8, 1.1, 6.2, 0.32, size=10, bold=True, color="#2c3e50")
+        rows = df.to_dict("records")
+        fig_grid = _fig_patch_grid(rows, labels_present, store)
+        _paste_pil(slide, fig_grid, 6.8, 1.5, 6.2, 5.8)
+
+
+# ---------------------------------------------------------------------------
+# Inter-annotator + B1/B2 overlap analysis
+# ---------------------------------------------------------------------------
+_ANN_B1_CTRL   = LAB / "annabel_control_project-17-at-2026-02-23-21-26-d1937bbb.csv"
+_ANN_B1_YCOMP  = LAB / "annabel_ycomp_project-18-at-2026-02-23-21-26-7bf8956c.csv"
+_MARG_B1_CTRL  = LAB / "Margaret_Control_V2_project-19-at-2026-02-09-21-46-5552392a.csv"
+_MARG_B1_YCOMP = LAB / "Margaret_Ycomp_V2_project-20-at-2026-02-09-21-40-9d1e4d7c.csv"
+_B2_DS1_FILE   = LAB / "vinc_combined_label_Annabel_20260816.csv"
+
+_AD_MAP_2CLS = {
+    "No adhesion":      "No adhesion",
+    "Nascent Adhesion": "adhesion",
+    "focal complex":    "adhesion",
+    "focal adhesion":   "adhesion",
+    "fibrillar adhesion": "adhesion",
+    "Uncertain":        "Uncertain",
+}
+
+
+def _load_interannotator_ds1_b1():
+    """Return (shared_df, n_ann_ctrl, n_ann_ycomp, n_marg_ctrl, n_marg_ycomp).
+    shared_df cols: uid, condition, annabel, margaret.
+    """
+    ann_ctrl  = pd.read_csv(_ANN_B1_CTRL);   ann_ctrl["condition"]  = "control"
+    ann_ycomp = pd.read_csv(_ANN_B1_YCOMP);  ann_ycomp["condition"] = "ycomp"
+    ann = pd.concat([ann_ctrl, ann_ycomp], ignore_index=True)
+    ann["uid"] = ann["condition"] + "-" + ann["crop_img_filename"]
+    ann_df = ann[["uid", "condition", "classification"]].rename(
+        columns={"classification": "annabel"})
+
+    # Margaret B1: consolidated file (all 5 sessions deduped, 1,340 patches)
+    marg = pd.read_csv(BATCH1_FILES["ds1"])  # labels_vinc_20260521.csv
+    n_marg_ctrl  = int((marg["condition"] == "control").sum())
+    n_marg_ycomp = int((marg["condition"] == "ycomp").sum())
+    marg_df = marg[["unique_ID", "classification"]].rename(
+        columns={"unique_ID": "uid", "classification": "margaret"})
+
+    both = ann_df.merge(marg_df, on="uid", how="inner")
+    return both, len(ann_ctrl), len(ann_ycomp), n_marg_ctrl, n_marg_ycomp
+
+
+def _load_b1_b2_overlap_ds1():
+    """Return (merged_df, b1_df, b2_df, n_b1, n_b2, n_overlap).
+    merged_df cols: uid_norm, b1_label, b2_label — only the 56 shared patches.
+    """
+    b1 = pd.read_csv(BATCH1_FILES["ds1"])
+    b2 = pd.read_csv(_B2_DS1_FILE)
+    # Normalize uid: B1 uses 'control-fXXXX...', B2 uses 'control_fXXXX...'
+    b1["uid_norm"] = b1["unique_ID"]
+    b2["uid_norm"] = b2["filename"].str.replace(
+        r'^(control|ycomp)_', lambda m: m.group(1) + "-", regex=True)
+    overlap_ids = set(b1["uid_norm"]) & set(b2["uid_norm"])
+    b1_sub = b1[b1["uid_norm"].isin(overlap_ids)][["uid_norm", "classification"]].rename(
+        columns={"classification": "b1_label"})
+    b2_sub = b2[b2["uid_norm"].isin(overlap_ids)][["uid_norm", "label"]].rename(
+        columns={"label": "b2_label"})
+    merged = b1_sub.merge(b2_sub, on="uid_norm")
+    return merged, b1, b2, len(b1), len(b2), len(overlap_ids)
+
+
+def _fig_confusion_heatmap(conf_df, title, row_label, col_label,
+                            agree_n, total_n, figsize=(5.0, 4.2)):
+    """Return PIL confusion-matrix heatmap."""
+    vals = conf_df.values.astype(float)
+    n_rows, n_cols = vals.shape
+    fig, ax = plt.subplots(figsize=figsize)
+    vmax = max(vals.max(), 1)
+    ax.imshow(vals, cmap="Blues", aspect="auto", vmin=0, vmax=vmax)
+    ax.set_xticks(range(n_cols))
+    ax.set_yticks(range(n_rows))
+    ax.set_xticklabels([FA5_SHORT.get(c, c) for c in conf_df.columns],
+                       rotation=45, ha="right", fontsize=9)
+    ax.set_yticklabels([FA5_SHORT.get(r, r) for r in conf_df.index], fontsize=9)
+    ax.set_xlabel(col_label, fontsize=9)
+    ax.set_ylabel(row_label, fontsize=9)
+    agree_pct = 100 * agree_n / total_n if total_n else 0.0
+    ax.set_title(f"{title}\nAgree: {agree_n}/{total_n} ({agree_pct:.1f}%)",
+                 fontsize=10, fontweight="bold")
+    for i in range(n_rows):
+        for j in range(n_cols):
+            v = int(vals[i, j])
+            if v > 0:
+                txt_c = "white" if vals[i, j] > vmax * 0.55 else "#333333"
+                ax.text(j, i, str(v), ha="center", va="center",
+                        fontsize=11, fontweight="bold", color=txt_c)
+    fig.tight_layout()
+    return _fig_to_pil(fig)
+
+
+def _slide_b1_interannotator(prs):
+    """Slide: DS1 B1 inter-annotator agreement — Annabel vs Margaret."""
+    both, n_ann_ctrl, n_ann_ycomp, n_marg_ctrl, n_marg_ycomp = \
+        _load_interannotator_ds1_b1()
+    n_ann   = n_ann_ctrl + n_ann_ycomp
+    n_marg  = n_marg_ctrl + n_marg_ycomp
+    n_shared = len(both)
+
+    # 2-class confusion
+    both["ann_2cls"]  = both["annabel"].map(_AD_MAP_2CLS)
+    both["marg_2cls"] = both["margaret"].map(_AD_MAP_2CLS)
+    agree_2 = (both["ann_2cls"] == both["marg_2cls"]).sum()
+    conf2 = pd.crosstab(both["ann_2cls"], both["marg_2cls"])
+    cls2_ord = [c for c in ["No adhesion", "adhesion", "Uncertain"]
+                if c in conf2.index or c in conf2.columns]
+    conf2 = conf2.reindex(
+        index=[c for c in cls2_ord if c in conf2.index],
+        columns=[c for c in cls2_ord if c in conf2.columns], fill_value=0)
+
+    # 5-class confusion
+    agree_5 = (both["annabel"] == both["margaret"]).sum()
+    conf5 = pd.crosstab(both["annabel"], both["margaret"])
+    ord5   = FA5_ORDER + ["Uncertain"]
+    conf5  = conf5.reindex(
+        index=[c for c in ord5 if c in conf5.index],
+        columns=[c for c in ord5 if c in conf5.columns], fill_value=0)
+
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _header(slide,
+            "Dataset 1 · Batch 1 — Inter-annotator Agreement: Annabel vs Margaret",
+            subtitle=(f"Annabel B1: {n_ann} patches ({n_ann_ctrl} ctrl + {n_ann_ycomp} ycomp)  ·  "
+                      f"Margaret B1: {n_marg} patches ({n_marg_ctrl} ctrl + {n_marg_ycomp} ycomp)  ·  "
+                      f"Shared (all Annabel patches also labeled by Margaret): {n_shared}"))
+
+    fig2 = _fig_confusion_heatmap(
+        conf2, "2-class: No adhesion vs adhesion",
+        row_label="Annabel", col_label="Margaret",
+        agree_n=int(agree_2), total_n=n_shared, figsize=(3.8, 3.4))
+    _paste_pil(slide, fig2, 0.4, 1.1, 6.0, 5.8)
+
+    fig5 = _fig_confusion_heatmap(
+        conf5, "5-class (FA subtypes)",
+        row_label="Annabel", col_label="Margaret",
+        agree_n=int(agree_5), total_n=n_shared, figsize=(5.5, 4.8))
+    _paste_pil(slide, fig5, 6.8, 1.1, 6.2, 5.8)
+
+
+def _fig_disagree_grid(groups, store, n_per_row=8, scale=4, patch_inch=1.05):
+    """groups: list of (row_label, [uids]). Returns PIL image.
+    Renders one row per confusion pair: label cell + patch images.
+    """
+    n_rows = len(groups)
+    fig_w = (n_per_row + 1.0) * patch_inch
+    fig_h = n_rows * patch_inch * 1.25
+    label_ratio = 1.4
+
+    fig, axes = plt.subplots(
+        n_rows, n_per_row + 1, figsize=(fig_w, fig_h),
+        gridspec_kw={"width_ratios": [label_ratio] + [1] * n_per_row})
+
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]
+
+    for r, (row_label, uids) in enumerate(groups):
+        axes[r, 0].text(0.5, 0.5, row_label, ha="center", va="center",
+                        fontsize=8.5, fontweight="bold",
+                        transform=axes[r, 0].transAxes)
+        axes[r, 0].set_facecolor("#f0f0f0")
+        axes[r, 0].tick_params(left=False, bottom=False,
+                               labelleft=False, labelbottom=False)
+        for spine in axes[r, 0].spines.values():
+            spine.set_visible(False)
+
+        shown = 0
+        for uid in uids[:n_per_row]:
+            h5fn = _uid_to_h5fn(uid)
+            img = store.get(h5fn, scale=scale)
+            if img is not None:
+                axes[r, shown + 1].imshow(np.array(img), cmap="gray", vmin=0, vmax=255)
+                shown += 1
+            axes[r, shown].axis("off") if shown < n_per_row else None
+
+        for c in range(shown + 1, n_per_row + 1):
+            axes[r, c].axis("off")
+
+    fig.subplots_adjust(hspace=0.06, wspace=0.04,
+                        left=0.01, right=0.99, top=0.97, bottom=0.02)
+    return _fig_to_pil(fig)
+
+
+def _slide_b1_disagree_patches(prs, both):
+    """Slides showing B1 inter-annotator disagreement patches, one row per confusion pair."""
+    short = lambda lbl: FA5_SHORT.get(lbl, lbl)
+    disagree = both[both["annabel"] != both["margaret"]]
+
+    pairs = (disagree.groupby(["annabel", "margaret"])
+             .size().reset_index(name="n")
+             .sort_values("n", ascending=False))
+
+    all_groups = []
+    for _, row in pairs.iterrows():
+        ann, marg, n = row["annabel"], row["margaret"], int(row["n"])
+        sub = disagree[(disagree["annabel"] == ann) & (disagree["margaret"] == marg)]
+        uids = list(sub["uid"])
+        label = f"Ann: {short(ann)}\n→ Marg: {short(marg)}\n(n={n})"
+        all_groups.append((label, uids))
+
+    store = _MultiStore(
+        _PatchStore(_QC_H5_BASE / "vinc/vinc_control_label.h5"),
+        _PatchStore(_QC_H5_BASE / "vinc/vinc_ycomp_label.h5"),
+    )
+
+    n_total = len(disagree)
+    n_pairs = len(pairs)
+    page_size = 6
+    total_pages = (len(all_groups) + page_size - 1) // page_size
+
+    for page_idx, page_start in enumerate(range(0, len(all_groups), page_size)):
+        groups = all_groups[page_start:page_start + page_size]
+        page_label = f" ({page_idx + 1}/{total_pages})" if total_pages > 1 else ""
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        _header(slide,
+                f"DS1 B1 — Inter-annotator Disagreement Patches{page_label}",
+                subtitle=(f"{n_total} disagreements across {n_pairs} confusion pairs  ·  "
+                          f"Annabel → Margaret  ·  up to 8 patches per pair  ·  "
+                          f"sorted by count (largest first)"))
+        fig_img = _fig_disagree_grid(groups, store, n_per_row=8, scale=4)
+        _paste_pil(slide, fig_img, 0.2, 1.05, 13.0, 6.3)
+
+
+def _slide_b1_b2_overlap(prs):
+    """Slide: DS1 B1 vs B2 patch overlap and label consistency."""
+    merged, b1, b2, n_b1, n_b2, n_overlap = _load_b1_b2_overlap_ds1()
+    agree_5 = (merged["b1_label"] == merged["b2_label"]).sum()
+    merged["b1_2cls"] = merged["b1_label"].map(_AD_MAP_2CLS)
+    merged["b2_2cls"] = merged["b2_label"].map(_AD_MAP_2CLS)
+    agree_2 = (merged["b1_2cls"] == merged["b2_2cls"]).sum()
+
+    # 5-class confusion on shared patches
+    conf5 = pd.crosstab(merged["b1_label"], merged["b2_label"])
+    ord5  = FA5_ORDER + ["Uncertain"]
+    conf5 = conf5.reindex(
+        index=[c for c in ord5 if c in conf5.index],
+        columns=[c for c in ord5 if c in conf5.columns], fill_value=0)
+
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _header(slide,
+            "Dataset 1 — Batch 1 vs Batch 2: Patch Overlap & Label Consistency",
+            subtitle=(f"B1 (Margaret, LabelStudio): {n_b1:,} patches  ·  "
+                      f"B2 (Annabel, prototype): {n_b2:,} patches  ·  "
+                      f"Same patch in both: {n_overlap}"))
+
+    # ── Left: overlap stats + agreement summary ─────────────────────────────
+    _txt(slide, "Patch overlap", 0.4, 1.1, 5.8, 0.38, size=11, bold=True, color="#2c3e50")
+    stats = [
+        ("B1 only (not in B2):", n_b1 - n_overlap),
+        ("In both B1 and B2:",   n_overlap),
+        ("B2 only (not in B1):", n_b2 - n_overlap),
+    ]
+    for i, (lbl, val) in enumerate(stats):
+        _txt(slide, f"  {lbl}  {val:,}", 0.4, 1.52 + i * 0.36, 5.8, 0.34,
+             size=10, color="#444444")
+
+    _txt(slide, f"Label agreement on {n_overlap} shared patches",
+         0.4, 2.72, 5.8, 0.38, size=11, bold=True, color="#2c3e50")
+    a2pct  = 100 * agree_2  / n_overlap if n_overlap else 0.0
+    a5pct  = 100 * agree_5  / n_overlap if n_overlap else 0.0
+    _txt(slide, f"  2-class (No adhesion vs adhesion): {agree_2}/{n_overlap} = {a2pct:.1f}%",
+         0.4, 3.1, 5.8, 0.32, size=10, color="#444444")
+    _txt(slide, f"  5-class (FA subtypes): {agree_5}/{n_overlap} = {a5pct:.1f}%",
+         0.4, 3.4, 5.8, 0.32, size=10, color="#444444")
+
+    # ── Left bottom: B1 vs B2 label distribution stacked bar ────────────────
+    b1_dist = b1["classification"].value_counts()
+    b2_dist = b2["label"].value_counts()
+    fig_dist, ax = plt.subplots(figsize=(5.2, 3.6))
+    x = [0, 0.6]
+    bots = [0, 0]
+    for cls in FA5_ORDER + ["Uncertain"]:
+        v1 = int(b1_dist.get(cls, 0))
+        v2 = int(b2_dist.get(cls, 0))
+        col = FA5_COLORS.get(cls, UNCERTAIN_COLOR)
+        for xi, v in [(0, v1), (1, v2)]:
+            ax.bar(x[xi], v, bottom=bots[xi], width=0.45, color=col, linewidth=0)
+            if v >= 10:
+                ax.text(x[xi], bots[xi] + v / 2, str(v),
+                        ha="center", va="center", fontsize=9, color="white", fontweight="bold")
+            bots[xi] += v
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"Batch 1\n({n_b1:,})", f"Batch 2\n({n_b2:,})"], fontsize=10)
+    ax.set_ylabel("# patches", fontsize=9)
+    ax.set_title("Full label distribution: B1 vs B2", fontsize=10, fontweight="bold")
+    legend_patches = [
+        mpatches.Patch(color=FA5_COLORS.get(c, UNCERTAIN_COLOR), label=FA5_SHORT.get(c, c))
+        for c in FA5_ORDER if b1_dist.get(c, 0) + b2_dist.get(c, 0) > 0
+    ]
+    ax.legend(handles=legend_patches, fontsize=7.5, loc="upper right")
+    ax.spines[["top", "right"]].set_visible(False)
+    fig_dist.tight_layout()
+    _paste_pil(slide, _fig_to_pil(fig_dist), 0.3, 3.78, 6.0, 3.55)
+
+    # ── Right: confusion on shared patches ──────────────────────────────────
+    fig5 = _fig_confusion_heatmap(
+        conf5, f"5-class confusion: {n_overlap} shared patches\n(B1=Margaret rows, B2=Annabel cols)",
+        row_label="B1 label (Margaret)", col_label="B2 label (Annabel)",
+        agree_n=int(agree_5), total_n=n_overlap, figsize=(5.5, 4.8))
+    _paste_pil(slide, fig5, 6.8, 1.1, 6.2, 6.2)
+
+
+# ---------------------------------------------------------------------------
 def main():
     prs = Presentation()
     prs.slide_width  = Inches(SLIDE_W)
@@ -1078,14 +1633,40 @@ def main():
     _slide_taxonomy(prs)
     _slide_batch1_sessions(prs)
     _slide_batch1_ds1(prs, b1_dfs)
+    both_interann, _, _, _, _ = _load_interannotator_ds1_b1()
+    _slide_b1_interannotator(prs)
+    _slide_b1_disagree_patches(prs, both_interann)
     _slide_batch1_ds23(prs, b1_dfs)
     _slide_images_per_batch(prs, b1_dfs, b2_dfs, batch=1)
     _slide_batch2_sessions(prs)
     _slide_batch2_ds1(prs, b2_dfs)
     _slide_batch2_ds23(prs, b2_dfs)
     _slide_images_per_batch(prs, b1_dfs, b2_dfs, batch=2)
+    _slide_b1_b2_overlap(prs)
     _slide_summary(prs, b1_dfs, b2_dfs)
     _slide_summary_by_condition(prs, b1_dfs, b2_dfs)
+
+    # QC summary slides (ported from FA_label_QC_summary.py with updated label sets)
+    print("Building QC slides (loading HDF5 patch stores)...")
+    try:
+        vinc_qc, pfak_qc, pfak_conflicts, ppax_qc = _load_qc_data()
+        store_vinc = _MultiStore(
+            _PatchStore(_QC_H5_BASE / "vinc/vinc_control_label.h5"),
+            _PatchStore(_QC_H5_BASE / "vinc/vinc_ycomp_label.h5"),
+        )
+        store_pfak = _PatchStore(_QC_H5_BASE / "pfak/pfak_control_label.h5")
+        store_ppax = _PatchStore(_QC_H5_BASE / "ppax/ppax_control_label.h5")
+
+        _slide_qc_overview(prs, vinc_qc, pfak_qc, pfak_conflicts, ppax_qc)
+        _slide_qc_ds(prs, "ds1", DS_LONG["ds1"], "Annabel", "Jul–Aug 2026",
+                     vinc_qc, store_vinc, conflicts=None)
+        _slide_qc_ds(prs, "ds2", DS_LONG["ds2"], "Annabel", "Apr–Aug 2026",
+                     pfak_qc, store_pfak, conflicts=pfak_conflicts if pfak_conflicts else None)
+        _slide_qc_ds(prs, "ds3", DS_LONG["ds3"], "Ernest", "Jul–Aug 2026",
+                     ppax_qc, store_ppax, conflicts=None)
+        print(f"  QC slides added ({4} slides).")
+    except Exception as e:
+        print(f"  WARNING: QC slides skipped — {e}")
 
     RES.mkdir(exist_ok=True)
     prs.save(OUT)

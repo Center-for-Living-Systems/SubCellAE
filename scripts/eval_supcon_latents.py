@@ -81,6 +81,15 @@ RUN_TAG_CFG = {
         "fold_splits_file": "fold_splits_ds1.csv",
         "datasets":    ["ds1"],
     },
+    "le_b12_ds1_lat64p32": {
+        "run_root":    DATA / "ae_results" / "contrastive_run" / "le_b12_ds1_lat64p32",
+        "ann_dir":     DATA / "labelling" / "le_b12_supcon",
+        "job_re":      re.compile(r"le_b12_ds1_lat64p32_fv(\d)_nb(\w+)_r(\d)"),
+        "ann_name_fn": lambda name: name.replace("_lat64p32", ""),
+        "fixed_ds":    "ds1",
+        "fold_splits_file": "fold_splits_ds1.csv",
+        "datasets":    ["ds1"],
+    },
     "le_b12_ds2_lat64p32": {
         "run_root":    DATA / "ae_results" / "contrastive_run" / "le_b12_ds2_lat64p32",
         "ann_dir":     DATA / "labelling" / "le_b12_supcon",
