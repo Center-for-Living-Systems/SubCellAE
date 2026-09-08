@@ -1830,7 +1830,7 @@ def _add_metrics_pptx_table(slide, left, top, width, height,
 
 def _slide_feature_quality_metrics(prs, fold: int = 0, repeat: int = 0):
     """Slide: editable PPTX tables — silhouette, CH, inter/intra distance ratio
-    for CP / ilastik / SupCon-nb150 / SupCon-nb750 × binary / 5-class."""
+    + LGBM bal. acc for CP / ilastik / SupCon-nb150 / SupCon-nb750 × binary / 5-class."""
     print("  Computing feature quality metrics …", flush=True)
     data = _load_all_features_for_metrics(fold=fold, repeat=repeat)
 
@@ -1844,23 +1844,52 @@ def _slide_feature_quality_metrics(prs, fold: int = 0, repeat: int = 0):
         ("Binary: adhesion vs No-adhesion", data["label2"]),
         ("5-class: FA subtypes",            data["label5"]),
     ]
-    metric_names = ["Silhouette", "Calinski-\nHarabasz", "Distance\nRatio I/I"]
-    metric_keys  = ["silhouette", "calinski_harabasz", "dist_ratio"]
-    metric_fmts  = [".3f", ".0f", ".3f"]
 
-    # Compute all metrics
+    # Load LGBM balanced accuracy for fold=0, repeat=0 at matching budgets
+    # CP and ilastik at budget=150 (to match SupCon-nb150 context); SupCon at own budget
+    def _bal_acc(csv_name, budget):
+        path = EVAL_DIR / csv_name
+        if not path.exists():
+            return np.nan
+        df = pd.read_csv(path)
+        r = df[(df["fold"] == fold) & (df["repeat"] == repeat)
+               & (df["budget"].astype(str) == str(budget))]
+        return float(r["bal_acc"].values[0]) if not r.empty else np.nan
+
+    lgbm_bal_acc = [
+        _bal_acc("cp_ds1.csv",                    150),   # CellProfiler at nb=150
+        _bal_acc("ilastik_ds1.csv",               150),   # ilastik at nb=150
+        _bal_acc("supcon_le_b2_lat12p8_ds1.csv",  150),   # SupCon-nb150 at budget=150
+        _bal_acc("supcon_le_b2_lat12p8_ds1.csv",  750),   # SupCon-nb750 at budget=750
+    ]
+
+    # Binary table: 3 feature metrics + LGBM bal. acc
+    metric_names_bin = ["Silhouette", "Calinski-\nHarabasz", "Distance\nRatio I/I", "LGBM\nBal. Acc"]
+    metric_keys_bin  = ["silhouette", "calinski_harabasz", "dist_ratio", "bal_acc"]
+    metric_fmts_bin  = [".3f", ".0f", ".3f", ".3f"]
+
+    # 5-class table: feature metrics only (no binary-LGBM acc)
+    metric_names_5cl = ["Silhouette", "Calinski-\nHarabasz", "Distance\nRatio I/I"]
+    metric_keys_5cl  = ["silhouette", "calinski_harabasz", "dist_ratio"]
+    metric_fmts_5cl  = [".3f", ".0f", ".3f"]
+
+    # Compute all feature metrics + inject bal_acc into binary dict
+    base_keys = ["silhouette", "calinski_harabasz", "dist_ratio"]
     results = []
-    for _, X, _ in methods:
+    for mi, (_, X, _) in enumerate(methods):
         row = []
-        for _, labels in label_schemes:
-            row.append(_compute_feature_metrics(X, labels) if X is not None
-                       else {k: np.nan for k in metric_keys})
+        for li, (_, labels) in enumerate(label_schemes):
+            m = _compute_feature_metrics(X, labels) if X is not None \
+                else {k: np.nan for k in base_keys}
+            if li == 0:   # binary — add LGBM acc
+                m["bal_acc"] = lgbm_bal_acc[mi]
+            row.append(m)
         results.append(row)
 
     slide = _blank(prs)
     _slide_header(
         slide,
-        "Feature Space Quality — Silhouette · Calinski-Harabasz · Scatter Ratio",
+        "Feature Space Quality — Silhouette · CH · Distance Ratio · LGBM Acc",
         "Full feature space (not 2D PCA) · DS1 B2 · 1,224 labeled patches "
         "· color: green = best, red = worst within each metric column",
     )
@@ -1875,16 +1904,24 @@ def _slide_feature_quality_metrics(prs, fold: int = 0, repeat: int = 0):
 
     for col_idx, (title, _) in enumerate(label_schemes):
         left = left_x if col_idx == 0 else right_x
-        _add_metrics_pptx_table(
-            slide, left, tbl_top, tbl_w, tbl_h,
-            title, results, col_idx,
-            methods, metric_names, metric_keys, metric_fmts,
-        )
+        if col_idx == 0:
+            _add_metrics_pptx_table(
+                slide, left, tbl_top, tbl_w, tbl_h,
+                title, results, col_idx,
+                methods, metric_names_bin, metric_keys_bin, metric_fmts_bin,
+            )
+        else:
+            _add_metrics_pptx_table(
+                slide, left, tbl_top, tbl_w, tbl_h,
+                title, results, col_idx,
+                methods, metric_names_5cl, metric_keys_5cl, metric_fmts_5cl,
+            )
 
     # Footer note
-    _txt(slide, "Higher is better for all three metrics  ·  "
-         "Silhouette computed on standardised features  ·  "
-         "CH and Scatter Ratio on raw feature space",
+    _txt(slide,
+         "Feature metrics on all 1,224 B2 DS1 labeled patches (standardised)  ·  "
+         "LGBM Bal. Acc: fold=0, repeat=0; CP/ilastik at budget=150, SupCon at matching budget  ·  "
+         "Higher is better for all metrics",
          Inches(0.35), Inches(7.18), Inches(12.63), Inches(0.25),
          size_pt=8, color=C_GREY, italic=True)
 
