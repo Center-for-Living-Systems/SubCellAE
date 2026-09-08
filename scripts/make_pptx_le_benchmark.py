@@ -1604,6 +1604,218 @@ def _slide_umap_5class(prs, budget: str = "150", fold: int = 0, repeat: int = 0)
 
 
 # ---------------------------------------------------------------------------
+# Feature quality metrics slide
+# ---------------------------------------------------------------------------
+
+def _compute_feature_metrics(X: np.ndarray, labels: np.ndarray) -> dict:
+    """Silhouette, Calinski-Harabasz, and between/within scatter ratio."""
+    from sklearn.metrics import silhouette_score, calinski_harabasz_score
+    from sklearn.preprocessing import StandardScaler
+
+    # Standardise before silhouette (distance-based) but not CH / scatter
+    Xs = StandardScaler().fit_transform(X)
+
+    sil = silhouette_score(Xs, labels, sample_size=min(len(labels), 1000),
+                           random_state=42)
+    ch  = calinski_harabasz_score(X, labels)
+
+    # Between / within scatter ratio: Tr(B) / Tr(W)
+    classes    = np.unique(labels)
+    mu_global  = X.mean(axis=0)
+    B_trace = sum(
+        np.sum(labels == c) * float(np.sum((X[labels == c].mean(axis=0) - mu_global) ** 2))
+        for c in classes
+    )
+    W_trace = sum(
+        float(np.sum((X[labels == c] - X[labels == c].mean(axis=0)) ** 2))
+        for c in classes
+    )
+    scatter = B_trace / W_trace if W_trace > 0 else 0.0
+
+    return {"silhouette": sil, "calinski_harabasz": ch, "scatter_ratio": scatter}
+
+
+def _load_all_features_for_metrics(fold: int = 0, repeat: int = 0):
+    """Load CP, ilastik, SupCon-nb150, SupCon-nb750 feature matrices
+    for all labeled patches (binary + 5-class labels). Returns dict."""
+    ann = pd.read_csv(ANN_B2_CSV)
+    ann["filename"] = ann["filename"].str.replace("-f", "_f", n=1)
+
+    cp_df = pd.read_csv(CP_CSV)
+    il_df = pd.read_csv(IL_CSV)
+
+    def _load_latents(budget):
+        name = f"le_b2_lat12p8_ds1_fv{fold}_nb{budget}_r{repeat}"
+        path = LE_B2_DIR / name / "latents.csv"
+        if not path.exists():
+            return None
+        df = pd.read_csv(path)
+        df["filename"] = df["filename"].str.replace("-f", "_f", n=1)
+        return df
+
+    lat150 = _load_latents("150")
+    lat750 = _load_latents("750")
+
+    # common labeled patches across all four feature sets
+    sets = [set(cp_df["filename"]), set(il_df["filename"]), set(ann["filename"])]
+    if lat150 is not None:
+        sets.append(set(lat150["filename"]))
+    if lat750 is not None:
+        sets.append(set(lat750["filename"]))
+    common = sorted(set.intersection(*sets))
+
+    ann_idx  = ann.set_index("filename").reindex(common)
+    label5   = ann_idx["label"].values                         # 5-class raw
+    label2   = np.where(label5 == "No adhesion", "No adhesion", "adhesion")
+
+    def _X(df, exclude=("filename",)):
+        cols = [c for c in df.columns if c not in exclude]
+        X = df.set_index("filename").reindex(common)[cols].values.astype(float)
+        col_means = np.nanmean(X, axis=0)
+        nans = np.isnan(X)
+        X[nans] = np.take(col_means, np.where(nans)[1])
+        return X
+
+    ref_lat = lat150 if lat150 is not None else lat750
+    z_cols  = [c for c in ref_lat.columns if c.startswith("z_")] if ref_lat is not None else []
+
+    return dict(
+        common=common,
+        label2=label2,
+        label5=label5,
+        X_cp=_X(cp_df),
+        X_il=_X(il_df),
+        X_lat150=lat150.set_index("filename").reindex(common)[z_cols].values.astype(float) if lat150 is not None else None,
+        X_lat750=lat750.set_index("filename").reindex(common)[z_cols].values.astype(float) if lat750 is not None else None,
+        z_cols=z_cols,
+        lat150=lat150,
+        lat750=lat750,
+    )
+
+
+def _slide_feature_quality_metrics(prs, fold: int = 0, repeat: int = 0):
+    """Slide: feature quality metrics table (silhouette, CH, scatter ratio)
+    for CP / ilastik / SupCon-nb150 / SupCon-nb750 × binary / 5-class."""
+    print("  Computing feature quality metrics …", flush=True)
+    data = _load_all_features_for_metrics(fold=fold, repeat=repeat)
+
+    # Compute metrics per method per label scheme
+    methods = [
+        ("CellProfiler",       data["X_cp"],     "#1f77b4"),
+        ("ilastik",            data["X_il"],     "#ff7f0e"),
+        ("SupCon-AE (nb=150)", data["X_lat150"], "#e377c2"),
+        ("SupCon-AE (nb=750)", data["X_lat750"], "#2ca02c"),
+    ]
+    label_schemes = [
+        ("Binary\n(ad vs no-ad)", data["label2"]),
+        ("5-class\n(FA subtypes)", data["label5"]),
+    ]
+    metric_names = ["Silhouette", "Calinski-\nHarabasz", "Scatter\nRatio B/W"]
+    metric_keys  = ["silhouette", "calinski_harabasz", "scatter_ratio"]
+    metric_fmts  = [".3f", ".0f", ".4f"]
+
+    # Collect results: shape (n_methods, n_schemes, n_metrics)
+    results = []
+    for mname, X, _ in methods:
+        row = []
+        for sname, labels in label_schemes:
+            if X is None:
+                row.append({k: np.nan for k in metric_keys})
+            else:
+                row.append(_compute_feature_metrics(X, labels))
+        results.append(row)
+
+    # Build figure: 2-column layout, one per label scheme
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5), facecolor="white")
+
+    for col_idx, (sname, _) in enumerate(label_schemes):
+        ax = axes[col_idx]
+        ax.set_facecolor("white")
+        ax.axis("off")
+
+        n_rows = len(methods)
+        n_cols = len(metric_names)
+        col_w  = 0.22
+        row_h  = 0.14
+        x0, y0 = 0.04, 0.88
+
+        # Header row
+        ax.text(x0 - 0.02, y0 + row_h * 0.6,
+                sname.replace("\n", " "), fontsize=11, fontweight="bold",
+                color="#162136", transform=ax.transAxes, va="center")
+        for ci, mname in enumerate(metric_names):
+            ax.text(x0 + ci * col_w + col_w / 2, y0 + row_h * 0.5,
+                    mname, fontsize=8.5, ha="center", va="center",
+                    color="#162136", fontweight="bold",
+                    transform=ax.transAxes)
+
+        # Collect values for colour scaling (per metric column, skip NaN)
+        vals_by_metric = []
+        for mi in range(n_cols):
+            col_vals = [results[ri][col_idx][metric_keys[mi]] for ri in range(n_rows)]
+            vals_by_metric.append(col_vals)
+
+        # Draw rows
+        for ri, (mname, _, mcolor) in enumerate(methods):
+            y = y0 - (ri + 1) * row_h
+            bg_color = "#F5F7FF" if ri % 2 == 0 else "#EAF0FF"
+            rect = plt.Rectangle((0.0, y - row_h * 0.45), 1.0, row_h * 0.9,
+                                  transform=ax.transAxes, color=bg_color,
+                                  zorder=0, clip_on=False)
+            ax.add_patch(rect)
+
+            # Method label with colour dot
+            ax.text(x0 - 0.02, y, "●", fontsize=9, color=mcolor,
+                    transform=ax.transAxes, va="center")
+            ax.text(x0 + 0.02, y, mname, fontsize=9,
+                    color="#1a1a1a", transform=ax.transAxes, va="center")
+
+            for ci, (mk, fmt) in enumerate(zip(metric_keys, metric_fmts)):
+                v = results[ri][col_idx][mk]
+                col_vals = [vv for vv in vals_by_metric[ci] if not np.isnan(vv)]
+                vmin, vmax = min(col_vals), max(col_vals)
+                # Colour: green=best, red=worst (within this column)
+                norm = (v - vmin) / (vmax - vmin + 1e-9)
+                cell_color = plt.cm.RdYlGn(norm)[:3]
+                cell_color = tuple(0.5 + 0.5 * c for c in cell_color)  # lighten
+
+                cx = x0 + ci * col_w + col_w / 2
+                rect2 = plt.Rectangle((cx - col_w * 0.45, y - row_h * 0.42),
+                                       col_w * 0.9, row_h * 0.84,
+                                       transform=ax.transAxes,
+                                       color=cell_color, zorder=1, clip_on=False)
+                ax.add_patch(rect2)
+
+                txt = "n/a" if np.isnan(v) else format(v, fmt)
+                ax.text(cx, y, txt, fontsize=9, ha="center", va="center",
+                        color="#1a1a1a", transform=ax.transAxes, zorder=2)
+
+        # Separator line under header
+        sep_y = y0 - row_h * 0.6
+        ax.plot([0.0, 1.0], [sep_y, sep_y], color="#AAAAAA", linewidth=0.8,
+                transform=ax.transAxes, clip_on=False)
+
+        # Bottom note
+        ax.text(0.5, -0.05, "Higher = better separation for all metrics",
+                fontsize=7.5, color="#666666", ha="center",
+                transform=ax.transAxes, style="italic")
+
+    fig.suptitle(
+        "Feature Quality Metrics — CP vs ilastik vs SupCon-AE · DS1 B2 labeled patches (n=1,224)",
+        fontsize=10.5, fontweight="bold", color="#162136", y=1.02,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+
+    slide = _blank(prs)
+    _slide_header(
+        slide,
+        "Feature Space Quality — Silhouette · Calinski-Harabasz · Scatter Ratio",
+        "Full feature space (not 2D PCA) · DS1 B2 · 1,224 labeled patches · green=best within metric",
+    )
+    _add_fig(slide, fig, Inches(0.3), Inches(1.05), Inches(12.9), Inches(6.1))
+
+
+# ---------------------------------------------------------------------------
 # Split CP / ilastik histogram slides
 # ---------------------------------------------------------------------------
 
@@ -2471,6 +2683,8 @@ def build_pptx(out_path: Path):
     _slide_umap_4class(prs, budget="750")
     print("  Slide 19c — UMAP 5-class: nb=750 (noad + FA subtypes)")
     _slide_umap_5class(prs, budget="750")
+    print("  Slide 19d — Feature quality metrics (silhouette / CH / scatter ratio)")
+    _slide_feature_quality_metrics(prs)
 
     # ---- Benchmark results (LGBM) ----
     print("  Slide 20a — DS1 B2 design")
