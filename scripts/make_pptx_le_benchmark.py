@@ -2726,6 +2726,156 @@ def _slide_ds1_b12_ctrl_vs_ycomp(prs):
         header_color=C_ACCENT, bullet_size=10)
 
 
+def _slide_ds1_b2_fa4_perclass(prs):
+    """Per-class F1 vs label budget for 5-class FA classification (SupCon/CP/ilastik) — DS1 B2."""
+    sc_path = EVAL_DIR / "le_b2_fa4_perclass_supcon_ds1.csv"
+    cp_path = EVAL_DIR / "le_b2_fa4_perclass_cp_ds1.csv"
+    il_path = EVAL_DIR / "le_b2_fa4_perclass_il_ds1.csv"
+
+    if not sc_path.exists() or pd.read_csv(sc_path).empty:
+        print("  B2 FA4 per-class eval CSV not found or empty, skipping slide", flush=True)
+        return
+
+    slide = _blank(prs)
+    _slide_header(slide,
+                  "DS1 B2 — FA Subtype Per-Class F1 vs Label Budget  [LGBM]",
+                  "5-class: No adhesion · focal adhesion · Nascent Adhesion · focal complex · fibrillar adhesion")
+
+    budgets = BUDGETS_B2
+    x       = np.arange(len(budgets))
+    xlabels = [str(b) for b in budgets]
+
+    fa4_classes = list(COLORS_5CLASS.keys())
+
+    fig, axes = plt.subplots(1, 3, figsize=(13, 5.0), facecolor="white")
+    panels = [
+        (sc_path, "SupCon-AE (B2, lat=12)"),
+        (cp_path, "CellProfiler"),
+        (il_path, "ilastik"),
+    ]
+
+    for ax, (path, method_label) in zip(axes, panels):
+        if not Path(path).exists():
+            ax.set_visible(False)
+            continue
+        df = pd.read_csv(path)
+        if df.empty:
+            ax.set_visible(False)
+            continue
+        num = df[df["budget"] != "all"].copy()
+        num["budget_int"] = num["budget"].astype(int)
+
+        for cls in fa4_classes:
+            col_name = f"f1_{cls}"
+            if col_name not in num.columns:
+                continue
+            s = num.groupby("budget_int")[col_name].agg(["mean", "std"]).reindex(budgets)
+            m  = s["mean"].values
+            sd = s["std"].values
+            valid = ~np.isnan(m)
+            color = COLORS_5CLASS[cls]
+            ax.plot(x[valid], m[valid] * 100,
+                    color=color, linewidth=2.0, marker="o", markersize=4, label=cls)
+            ax.fill_between(x[valid],
+                            (m[valid] - sd[valid]) * 100,
+                            (m[valid] + sd[valid]) * 100,
+                            color=color, alpha=0.10)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(xlabels, fontsize=7, rotation=45, ha="right")
+        ax.set_xlabel("Label budget", fontsize=9)
+        ax.set_ylabel("F1 score (%)", fontsize=9)
+        ax.set_ylim(-2, 102)
+        ax.set_title(method_label, fontsize=10, fontweight="bold")
+        ax.legend(fontsize=7.5, framealpha=0.9, loc="lower right")
+        ax.set_facecolor("white")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.grid(axis="y", color="#EEEEEE", linewidth=0.7)
+
+    fig.suptitle("Per-Class F1 · DS1 B2 FA Types · 5-fold CV × 5 repeats",
+                 fontsize=11, fontweight="bold", y=1.02)
+    fig.tight_layout(pad=1.5)
+    _add_fig(slide, fig, Inches(0.2), Inches(1.05), Inches(13.0), Inches(6.2))
+
+
+def _slide_ds1_b2_ctrl_vs_ycomp(prs):
+    """Ctrl vs ycomp classification accuracy (ad / no-ad subsets) — DS1 B2."""
+    slide = _blank(prs)
+    _slide_header(slide,
+                  "DS1 B2 — Ctrl vs Ycomp Classification: Adhesion vs No-Adhesion Patches  [LGBM]",
+                  "Using the same SupCon-AE latents (B2, lat=12) — classifier trained on condition labels, not ad/no-ad")
+
+    sc_path = EVAL_DIR / "le_b2_ctrlvy_supcon_ds1.csv"
+    cp_path = EVAL_DIR / "le_b2_ctrlvy_cp_ds1.csv"
+    il_path = EVAL_DIR / "le_b2_ctrlvy_il_ds1.csv"
+
+    if not sc_path.exists() or pd.read_csv(sc_path).empty:
+        _txt(slide, "Ctrl vs ycomp eval not yet computed — run eval_le_b2_ctrl_vs_ycomp.py",
+             Inches(2), Inches(3), Inches(9), Inches(1), size_pt=18, color=C_GREY)
+        return
+
+    budgets = BUDGETS_B2
+    x       = np.arange(len(budgets))
+    xlabels = [str(b) for b in budgets]
+
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 5.5), facecolor="white")
+
+    for ax, subset, title_tag in zip(
+        axes,
+        ["ad", "noad"],
+        ["Adhesion patches only", "No-adhesion patches only"],
+    ):
+        for path, color, label in [
+            (sc_path, COL_SUPCON,  "SupCon-AE (B2, lat=12)"),
+            (cp_path, COL_CP,      "CellProfiler"),
+            (il_path, COL_ILASTIK, "ilastik"),
+        ]:
+            if not Path(path).exists():
+                continue
+            s = _summarize_ctrlvy(path, subset, budgets)
+            m = s["mean"].values
+            sd = s["std"].values
+            valid = ~np.isnan(m)
+            ax.plot(x[valid], m[valid] * 100,
+                    color=color, linewidth=2.2, marker="o", markersize=5, label=label)
+            ax.fill_between(x[valid],
+                            (m[valid] - sd[valid]) * 100,
+                            (m[valid] + sd[valid]) * 100,
+                            color=color, alpha=0.12)
+
+        ax.axhline(95, color="#888888", linestyle="--", linewidth=1.2, alpha=0.75, zorder=0)
+        ax.text(len(budgets) - 0.08, 95.5, "95 %",
+                color="#888888", fontsize=8, ha="right", va="bottom")
+        ax.set_xticks(x)
+        ax.set_xticklabels(xlabels, fontsize=8, rotation=45, ha="right")
+        ax.set_xlabel("Label budget (n patches)", fontsize=10)
+        ax.set_ylabel("Balanced accuracy — ctrl vs ycomp (%)", fontsize=10)
+        ax.set_ylim(42, 102)
+        ax.legend(fontsize=9, framealpha=0.9, loc="lower right")
+        ax.set_facecolor("white")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.set_title(title_tag, fontsize=11, fontweight="bold", pad=8)
+        ax.grid(axis="y", color="#EEEEEE", linewidth=0.7)
+
+    fig.suptitle("Ctrl vs Ycomp Classification · DS1 B2 · LGBM · 5-fold CV × 5 repeats",
+                 fontsize=11, fontweight="bold", y=1.01)
+    fig.tight_layout(pad=1.5)
+
+    _add_fig(slide, fig, Inches(0.3), PLOT_TOP, Inches(9.2), PLOT_H)
+
+    _bullet_box(slide,
+        Inches(9.7), PANEL_TOP, Inches(3.3), PANEL_H,
+        "Interpretation",
+        ["Classification task: ctrl (0) vs ycomp (1)",
+         "SupCon trained on ad/no-ad labels — not condition",
+         "Curves show whether latents capture condition info",
+         "as ad/no-ad supervision budget increases",
+         "CP and ilastik are budget-independent baselines",
+         "(LGBM trained on same budget subset each time)",
+         "B2 DS1: ~770 no-ad / 454 ad labeled patches"],
+        header_color=C_ACCENT, bullet_size=10)
+
+
 def _slide_appendix_divider(prs):
     slide = _blank(prs)
     _slide_header(slide, "Appendix — Logistic Regression Results",
@@ -2802,6 +2952,10 @@ def build_pptx(out_path: Path):
     _slide_ds1_b2_design(prs)
     print("  Slide 20b — DS1 B2 LGBM")
     _slide_ds1_b2_lgbm(prs)
+    print("  Slide 20c — DS1 B2 FA subtype per-class F1 curves")
+    _slide_ds1_b2_fa4_perclass(prs)
+    print("  Slide 20d — DS1 B2 ctrl vs ycomp (ad/noad subsets)")
+    _slide_ds1_b2_ctrl_vs_ycomp(prs)
 
     print("  Slide 21a — DS1 B12 design")
     _slide_ds1_b12_design(prs)
