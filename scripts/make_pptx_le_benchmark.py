@@ -1608,31 +1608,34 @@ def _slide_umap_5class(prs, budget: str = "150", fold: int = 0, repeat: int = 0)
 # ---------------------------------------------------------------------------
 
 def _compute_feature_metrics(X: np.ndarray, labels: np.ndarray) -> dict:
-    """Silhouette, Calinski-Harabasz, and between/within scatter ratio."""
+    """Silhouette, Calinski-Harabasz, and inter/intra-class distance ratio."""
     from sklearn.metrics import silhouette_score, calinski_harabasz_score
     from sklearn.preprocessing import StandardScaler
+    from itertools import combinations
 
-    # Standardise before silhouette (distance-based) but not CH / scatter
+    # Standardise for all distance-based metrics
     Xs = StandardScaler().fit_transform(X)
 
     sil = silhouette_score(Xs, labels, sample_size=min(len(labels), 1000),
                            random_state=42)
     ch  = calinski_harabasz_score(X, labels)
 
-    # Between / within scatter ratio: Tr(B) / Tr(W)
-    classes    = np.unique(labels)
-    mu_global  = X.mean(axis=0)
-    B_trace = sum(
-        np.sum(labels == c) * float(np.sum((X[labels == c].mean(axis=0) - mu_global) ** 2))
+    # Inter/intra-class distance ratio on standardised features
+    classes   = np.unique(labels)
+    centroids = {c: Xs[labels == c].mean(axis=0) for c in classes}
+    # inter: mean Euclidean distance between each pair of class centroids
+    inter = np.mean([
+        np.linalg.norm(centroids[a] - centroids[b])
+        for a, b in combinations(classes, 2)
+    ]) if len(classes) >= 2 else 0.0
+    # intra: mean point-to-own-centroid distance across all classes
+    intra = np.mean([
+        np.linalg.norm(Xs[labels == c] - centroids[c], axis=1).mean()
         for c in classes
-    )
-    W_trace = sum(
-        float(np.sum((X[labels == c] - X[labels == c].mean(axis=0)) ** 2))
-        for c in classes
-    )
-    scatter = B_trace / W_trace if W_trace > 0 else 0.0
+    ])
+    dist_ratio = inter / intra if intra > 0 else 0.0
 
-    return {"silhouette": sil, "calinski_harabasz": ch, "scatter_ratio": scatter}
+    return {"silhouette": sil, "calinski_harabasz": ch, "dist_ratio": dist_ratio}
 
 
 def _load_all_features_for_metrics(fold: int = 0, repeat: int = 0):
@@ -1826,7 +1829,7 @@ def _add_metrics_pptx_table(slide, left, top, width, height,
 
 
 def _slide_feature_quality_metrics(prs, fold: int = 0, repeat: int = 0):
-    """Slide: editable PPTX tables — silhouette, CH, scatter ratio
+    """Slide: editable PPTX tables — silhouette, CH, inter/intra distance ratio
     for CP / ilastik / SupCon-nb150 / SupCon-nb750 × binary / 5-class."""
     print("  Computing feature quality metrics …", flush=True)
     data = _load_all_features_for_metrics(fold=fold, repeat=repeat)
@@ -1841,9 +1844,9 @@ def _slide_feature_quality_metrics(prs, fold: int = 0, repeat: int = 0):
         ("Binary: adhesion vs No-adhesion", data["label2"]),
         ("5-class: FA subtypes",            data["label5"]),
     ]
-    metric_names = ["Silhouette", "Calinski-\nHarabasz", "Scatter\nRatio B/W"]
-    metric_keys  = ["silhouette", "calinski_harabasz", "scatter_ratio"]
-    metric_fmts  = [".3f", ".0f", ".4f"]
+    metric_names = ["Silhouette", "Calinski-\nHarabasz", "Distance\nRatio I/I"]
+    metric_keys  = ["silhouette", "calinski_harabasz", "dist_ratio"]
+    metric_fmts  = [".3f", ".0f", ".3f"]
 
     # Compute all metrics
     results = []
@@ -2754,7 +2757,7 @@ def build_pptx(out_path: Path):
     _slide_umap_4class(prs, budget="750")
     print("  Slide 19c — UMAP 5-class: nb=750 (noad + FA subtypes)")
     _slide_umap_5class(prs, budget="750")
-    print("  Slide 19d — Feature quality metrics (silhouette / CH / scatter ratio)")
+    print("  Slide 19d — Feature quality metrics (silhouette / CH / distance ratio)")
     _slide_feature_quality_metrics(prs)
 
     # ---- Benchmark results (LGBM) ----
