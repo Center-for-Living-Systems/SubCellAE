@@ -1693,126 +1693,197 @@ def _load_all_features_for_metrics(fold: int = 0, repeat: int = 0):
     )
 
 
+def _metric_bg_color(v: float, vmin: float, vmax: float) -> RGBColor:
+    """Two-stop gradient: red (#FFCDD2) → yellow (#FFF9C4) → green (#C8E6C9)."""
+    norm = (v - vmin) / (vmax - vmin + 1e-9)
+    norm = max(0.0, min(1.0, norm))
+    if norm <= 0.5:
+        t = norm * 2          # 0→1 across red..yellow
+        r = int(255)
+        g = int(205 + t * (249 - 205))
+        b = int(210 + t * (196 - 210))
+    else:
+        t = (norm - 0.5) * 2  # 0→1 across yellow..green
+        r = int(255 + t * (200 - 255))
+        g = int(249 + t * (230 - 249))
+        b = int(196 + t * (201 - 196))
+    return RGBColor(r, g, b)
+
+
+def _tbl_cell(cell, text, bold=False, size_pt=10.5,
+              font_color=RGBColor(0x1A, 0x1A, 0x1A),
+              bg_color: RGBColor | None = None,
+              align=PP_ALIGN.CENTER):
+    """Write text into a table cell with consistent formatting."""
+    if bg_color is not None:
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = bg_color
+    tf = cell.text_frame
+    tf.word_wrap = True
+    para = tf.paragraphs[0]
+    para.alignment = align
+    run = para.add_run()
+    run.text = text
+    run.font.size  = Pt(size_pt)
+    run.font.bold  = bold
+    run.font.color.rgb = font_color
+
+
+def _add_metrics_pptx_table(slide, left, top, width, height,
+                             title: str,
+                             results: list, col_idx: int,
+                             methods: list,
+                             metric_names: list, metric_keys: list, metric_fmts: list):
+    """Build one editable PPTX table for one label scheme."""
+    # rows: 1 header + len(methods) data rows
+    n_data = len(methods)
+    n_cols = 1 + len(metric_names)      # method name + metric columns
+    n_rows = 1 + n_data
+
+    # Column widths (must sum to width)
+    col_widths = [Inches(2.35)] + [
+        (width - Inches(2.35)) // len(metric_names)
+    ] * len(metric_names)
+    # fix rounding: adjust last col
+    col_widths[-1] = width - sum(col_widths[:-1])
+
+    # Row heights
+    hdr_h   = Inches(0.58)
+    data_h  = (height - hdr_h) // n_data
+    row_heights = [hdr_h] + [data_h] * n_data
+
+    tbl_shape = slide.shapes.add_table(n_rows, n_cols, left, top, width, height)
+    tbl = tbl_shape.table
+
+    for ci, w in enumerate(col_widths):
+        tbl.columns[ci].width = w
+    for ri, h in enumerate(row_heights):
+        tbl.rows[ri].height = h
+
+    # ---- Header row ----
+    C_HDR_BG   = RGBColor(0x16, 0x21, 0x3E)
+    C_HDR_TEXT = RGBColor(0xFF, 0xFF, 0xFF)
+
+    _tbl_cell(tbl.cell(0, 0), title,
+              bold=True, size_pt=11, font_color=C_HDR_TEXT, bg_color=C_HDR_BG,
+              align=PP_ALIGN.LEFT)
+    for ci, mname in enumerate(metric_names):
+        _tbl_cell(tbl.cell(0, ci + 1), mname,
+                  bold=True, size_pt=10, font_color=C_HDR_TEXT, bg_color=C_HDR_BG)
+
+    # ---- Pre-compute per-column min/max for colour scaling ----
+    col_ranges = {}
+    for mk in metric_keys:
+        vals = [results[ri][col_idx][mk] for ri in range(n_data)
+                if not np.isnan(results[ri][col_idx][mk])]
+        col_ranges[mk] = (min(vals), max(vals)) if vals else (0.0, 1.0)
+
+    # ---- Method colour map (dot indicator in name column) ----
+    method_colors_hex = [c for _, _, c in methods]
+
+    # ---- Data rows ----
+    ALT_A = RGBColor(0xF5, 0xF7, 0xFF)
+    ALT_B = RGBColor(0xEA, 0xF0, 0xFF)
+
+    for ri, (mname, _, mhex) in enumerate(methods):
+        row_bg = ALT_A if ri % 2 == 0 else ALT_B
+
+        # Method name cell — use method colour as left border accent via text prefix
+        mcolor_rgb = RGBColor(
+            int(mhex[1:3], 16), int(mhex[3:5], 16), int(mhex[5:7], 16)
+        )
+        cell0 = tbl.cell(ri + 1, 0)
+        cell0.fill.solid()
+        cell0.fill.fore_color.rgb = row_bg
+        tf = cell0.text_frame
+        tf.word_wrap = True
+        para = tf.paragraphs[0]
+        para.alignment = PP_ALIGN.LEFT
+        # coloured bullet run
+        dot = para.add_run()
+        dot.text = "● "
+        dot.font.size = Pt(10)
+        dot.font.color.rgb = mcolor_rgb
+        # name run
+        name_run = para.add_run()
+        name_run.text = mname
+        name_run.font.size  = Pt(10.5)
+        name_run.font.bold  = False
+        name_run.font.color.rgb = RGBColor(0x1A, 0x1A, 0x1A)
+
+        # Metric cells
+        for ci, (mk, fmt) in enumerate(zip(metric_keys, metric_fmts)):
+            v = results[ri][col_idx][mk]
+            vmin, vmax = col_ranges[mk]
+            if np.isnan(v):
+                bg = RGBColor(0xEE, 0xEE, 0xEE)
+                txt = "n/a"
+            else:
+                bg  = _metric_bg_color(v, vmin, vmax)
+                txt = format(v, fmt)
+            _tbl_cell(tbl.cell(ri + 1, ci + 1), txt,
+                      size_pt=10.5, bg_color=bg)
+
+
 def _slide_feature_quality_metrics(prs, fold: int = 0, repeat: int = 0):
-    """Slide: feature quality metrics table (silhouette, CH, scatter ratio)
+    """Slide: editable PPTX tables — silhouette, CH, scatter ratio
     for CP / ilastik / SupCon-nb150 / SupCon-nb750 × binary / 5-class."""
     print("  Computing feature quality metrics …", flush=True)
     data = _load_all_features_for_metrics(fold=fold, repeat=repeat)
 
-    # Compute metrics per method per label scheme
     methods = [
-        ("CellProfiler",       data["X_cp"],     "#1f77b4"),
-        ("ilastik",            data["X_il"],     "#ff7f0e"),
-        ("SupCon-AE (nb=150)", data["X_lat150"], "#e377c2"),
-        ("SupCon-AE (nb=750)", data["X_lat750"], "#2ca02c"),
+        ("CellProfiler",       data["X_cp"],     COL_CP),
+        ("ilastik",            data["X_il"],     COL_ILASTIK),
+        ("SupCon-AE (nb=150)", data["X_lat150"], COL_SUPCON),
+        ("SupCon-AE (nb=750)", data["X_lat750"], COL_SUPCON64),
     ]
     label_schemes = [
-        ("Binary\n(ad vs no-ad)", data["label2"]),
-        ("5-class\n(FA subtypes)", data["label5"]),
+        ("Binary: adhesion vs No-adhesion", data["label2"]),
+        ("5-class: FA subtypes",            data["label5"]),
     ]
     metric_names = ["Silhouette", "Calinski-\nHarabasz", "Scatter\nRatio B/W"]
     metric_keys  = ["silhouette", "calinski_harabasz", "scatter_ratio"]
     metric_fmts  = [".3f", ".0f", ".4f"]
 
-    # Collect results: shape (n_methods, n_schemes, n_metrics)
+    # Compute all metrics
     results = []
-    for mname, X, _ in methods:
+    for _, X, _ in methods:
         row = []
-        for sname, labels in label_schemes:
-            if X is None:
-                row.append({k: np.nan for k in metric_keys})
-            else:
-                row.append(_compute_feature_metrics(X, labels))
+        for _, labels in label_schemes:
+            row.append(_compute_feature_metrics(X, labels) if X is not None
+                       else {k: np.nan for k in metric_keys})
         results.append(row)
-
-    # Build figure: 2-column layout, one per label scheme
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5), facecolor="white")
-
-    for col_idx, (sname, _) in enumerate(label_schemes):
-        ax = axes[col_idx]
-        ax.set_facecolor("white")
-        ax.axis("off")
-
-        n_rows = len(methods)
-        n_cols = len(metric_names)
-        col_w  = 0.22
-        row_h  = 0.14
-        x0, y0 = 0.04, 0.88
-
-        # Header row
-        ax.text(x0 - 0.02, y0 + row_h * 0.6,
-                sname.replace("\n", " "), fontsize=11, fontweight="bold",
-                color="#162136", transform=ax.transAxes, va="center")
-        for ci, mname in enumerate(metric_names):
-            ax.text(x0 + ci * col_w + col_w / 2, y0 + row_h * 0.5,
-                    mname, fontsize=8.5, ha="center", va="center",
-                    color="#162136", fontweight="bold",
-                    transform=ax.transAxes)
-
-        # Collect values for colour scaling (per metric column, skip NaN)
-        vals_by_metric = []
-        for mi in range(n_cols):
-            col_vals = [results[ri][col_idx][metric_keys[mi]] for ri in range(n_rows)]
-            vals_by_metric.append(col_vals)
-
-        # Draw rows
-        for ri, (mname, _, mcolor) in enumerate(methods):
-            y = y0 - (ri + 1) * row_h
-            bg_color = "#F5F7FF" if ri % 2 == 0 else "#EAF0FF"
-            rect = plt.Rectangle((0.0, y - row_h * 0.45), 1.0, row_h * 0.9,
-                                  transform=ax.transAxes, color=bg_color,
-                                  zorder=0, clip_on=False)
-            ax.add_patch(rect)
-
-            # Method label with colour dot
-            ax.text(x0 - 0.02, y, "●", fontsize=9, color=mcolor,
-                    transform=ax.transAxes, va="center")
-            ax.text(x0 + 0.02, y, mname, fontsize=9,
-                    color="#1a1a1a", transform=ax.transAxes, va="center")
-
-            for ci, (mk, fmt) in enumerate(zip(metric_keys, metric_fmts)):
-                v = results[ri][col_idx][mk]
-                col_vals = [vv for vv in vals_by_metric[ci] if not np.isnan(vv)]
-                vmin, vmax = min(col_vals), max(col_vals)
-                # Colour: green=best, red=worst (within this column)
-                norm = (v - vmin) / (vmax - vmin + 1e-9)
-                cell_color = plt.cm.RdYlGn(norm)[:3]
-                cell_color = tuple(0.5 + 0.5 * c for c in cell_color)  # lighten
-
-                cx = x0 + ci * col_w + col_w / 2
-                rect2 = plt.Rectangle((cx - col_w * 0.45, y - row_h * 0.42),
-                                       col_w * 0.9, row_h * 0.84,
-                                       transform=ax.transAxes,
-                                       color=cell_color, zorder=1, clip_on=False)
-                ax.add_patch(rect2)
-
-                txt = "n/a" if np.isnan(v) else format(v, fmt)
-                ax.text(cx, y, txt, fontsize=9, ha="center", va="center",
-                        color="#1a1a1a", transform=ax.transAxes, zorder=2)
-
-        # Separator line under header
-        sep_y = y0 - row_h * 0.6
-        ax.plot([0.0, 1.0], [sep_y, sep_y], color="#AAAAAA", linewidth=0.8,
-                transform=ax.transAxes, clip_on=False)
-
-        # Bottom note
-        ax.text(0.5, -0.05, "Higher = better separation for all metrics",
-                fontsize=7.5, color="#666666", ha="center",
-                transform=ax.transAxes, style="italic")
-
-    fig.suptitle(
-        "Feature Quality Metrics — CP vs ilastik vs SupCon-AE · DS1 B2 labeled patches (n=1,224)",
-        fontsize=10.5, fontweight="bold", color="#162136", y=1.02,
-    )
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
 
     slide = _blank(prs)
     _slide_header(
         slide,
         "Feature Space Quality — Silhouette · Calinski-Harabasz · Scatter Ratio",
-        "Full feature space (not 2D PCA) · DS1 B2 · 1,224 labeled patches · green=best within metric",
+        "Full feature space (not 2D PCA) · DS1 B2 · 1,224 labeled patches "
+        "· color: green = best, red = worst within each metric column",
     )
-    _add_fig(slide, fig, Inches(0.3), Inches(1.05), Inches(12.9), Inches(6.1))
+
+    # Two tables side by side
+    tbl_top   = Inches(1.20)
+    tbl_h     = Inches(5.90)
+    tbl_w     = Inches(6.35)
+    gap       = Inches(0.23)
+    left_x    = Inches(0.35)
+    right_x   = left_x + tbl_w + gap
+
+    for col_idx, (title, _) in enumerate(label_schemes):
+        left = left_x if col_idx == 0 else right_x
+        _add_metrics_pptx_table(
+            slide, left, tbl_top, tbl_w, tbl_h,
+            title, results, col_idx,
+            methods, metric_names, metric_keys, metric_fmts,
+        )
+
+    # Footer note
+    _txt(slide, "Higher is better for all three metrics  ·  "
+         "Silhouette computed on standardised features  ·  "
+         "CH and Scatter Ratio on raw feature space",
+         Inches(0.35), Inches(7.18), Inches(12.63), Inches(0.25),
+         size_pt=8, color=C_GREY, italic=True)
 
 
 # ---------------------------------------------------------------------------
