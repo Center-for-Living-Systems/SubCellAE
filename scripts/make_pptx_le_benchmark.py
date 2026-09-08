@@ -1400,18 +1400,18 @@ def _slide_supcon_top_features(prs, budget: str = "150", fold: int = 0, repeat: 
 
 # Color maps for multi-class UMAP coloring
 COLORS_4CLASS = {
-    "ctrl · adhesion":    "#1f78b4",   # dark blue
-    "ctrl · No adhesion": "#a6cee3",   # light blue
-    "ycomp · adhesion":   "#e31a1c",   # dark red
-    "ycomp · No adhesion":"#fb9a99",   # light red
+    "ctrl · adhesion":    "#b22222",   # dark red   (ctrl, adhesion)
+    "ctrl · No adhesion": "#f4a3a3",   # light red  (ctrl, no adhesion)
+    "ycomp · adhesion":   "#1a7a1a",   # dark green (ycomp, adhesion)
+    "ycomp · No adhesion":"#90d490",   # light green (ycomp, no adhesion)
 }
 
 COLORS_5CLASS = {
-    "No adhesion":        "#888888",   # grey
-    "focal adhesion":     "#1f77b4",   # blue
-    "Nascent Adhesion":   "#ff7f0e",   # orange
-    "focal complex":      "#2ca02c",   # green
-    "fibrillar adhesion": "#9467bd",   # purple
+    "No adhesion":        "#9467bd",   # purple
+    "focal adhesion":     "#2ca02c",   # green
+    "Nascent Adhesion":   "#1f77b4",   # blue
+    "focal complex":      "#ff7f0e",   # orange
+    "fibrillar adhesion": "#d62728",   # red
 }
 
 
@@ -1566,7 +1566,7 @@ def _slide_umap_4class(prs, budget: str = "150", fold: int = 0, repeat: int = 0)
     slide = _blank(prs)
     _slide_header(slide,
                   f"Embedding — 4-Class: Ctrl/Ycomp × Adhesion/No-Adhesion  [nb={budget}]",
-                  f"PCA (2D) · DS1 B2 · fold={fold}, repeat={repeat}")
+                  f"PCA (2D) · DS1 B2 · fold={fold}, repeat={repeat} · red=ctrl, green=ycomp · dark=adhesion, light=no-adhesion")
     _add_fig(slide, fig, Inches(0.2), Inches(1.05), Inches(13.0), Inches(6.2))
 
 
@@ -1599,7 +1599,7 @@ def _slide_umap_5class(prs, budget: str = "150", fold: int = 0, repeat: int = 0)
     slide = _blank(prs)
     _slide_header(slide,
                   f"Embedding — 5-Class: No-Adhesion + FA Subtypes  [nb={budget}]",
-                  f"PCA (2D) · DS1 B2 · fold={fold}, repeat={repeat} · grey=No-adh · blue=focal · orange=nascent · green=complex · purple=fibrillar")
+                  f"PCA (2D) · DS1 B2 · fold={fold}, repeat={repeat} · purple=No-adh · green=focal · blue=nascent · orange=complex · red=fibrillar")
     _add_fig(slide, fig, Inches(0.2), Inches(1.05), Inches(13.0), Inches(6.2))
 
 
