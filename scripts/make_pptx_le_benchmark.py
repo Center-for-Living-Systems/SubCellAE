@@ -2112,7 +2112,7 @@ def _slide_b1b2_label_quality(prs):
         ax.grid(axis="y", color="#EEEEEE", linewidth=0.7)
 
     fig.suptitle("Label quality drives performance — B2 labels are consistently +0.17–0.20 bal acc better",
-                 fontsize=10.5, color=C_BODY, y=1.01)
+                 fontsize=10.5, color="#1a1a1a", y=1.01)
     fig.tight_layout()
 
     _add_fig(slide, fig, PLOT_LEFT, PLOT_TOP, PLOT_W, PLOT_H)
