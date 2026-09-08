@@ -88,6 +88,25 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
                 d["include_frames"] = [int(f) for f in entry["include_frames"]]
             patch_dirs.append(d)
 
+    # ---- coord_dirs (multiscale / online-crop) ----
+    raw_coord_dirs = _get("data", "coord_dirs", [])
+    coord_dirs = []
+    for entry in raw_coord_dirs:
+        d = {
+            "coord_csv":      str(entry["coord_csv"]),
+            "frame_dir":      str(entry["frame_dir"]),
+            "channel":        str(entry.get("channel", "pax")),
+            "condition":      int(entry.get("condition", 0)),
+            "condition_name": str(entry.get("condition_name", "")),
+        }
+        if "annotation_label_col" in entry:
+            d["annotation_label_col"] = str(entry["annotation_label_col"])
+        if "label_order" in entry:
+            d["label_order"] = list(entry["label_order"])
+        if "val_split" in entry:
+            d["val_split"] = float(entry["val_split"])
+        coord_dirs.append(d)
+
     # ---- output ----
     result_dir = Path(_get("output", "result_dir", "results/ae"))
 
@@ -199,6 +218,7 @@ def load_config(yaml_path: str | Path, root_folder: str | None = None) -> AEConf
     return AEConfig(
         result_dir=result_dir,
         patch_dirs=patch_dirs,
+        coord_dirs=coord_dirs,
         model_type=model_type,
         latent_dim=latent_dim,
         input_ps=input_ps,
