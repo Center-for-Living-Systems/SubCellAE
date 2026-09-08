@@ -1150,9 +1150,10 @@ class CoordCropDataset(Dataset):
         label_order: list | None = None,
         split_filter: str | None = None,
     ):
-        self.patch_size = patch_size
-        self.condition  = condition
-        self.channel    = channel
+        self.patch_size     = patch_size
+        self.condition      = condition
+        self.channel        = channel
+        self.condition_name = condition_name or str(condition)
 
         # ---- Load coord CSV ----
         df = pd.read_csv(coord_csv)
@@ -1167,6 +1168,9 @@ class CoordCropDataset(Dataset):
         self.label_to_int  = {}
         self.num_classes   = 0
         self._ann_labels: list[int] = []
+        self.label_order_2  = None   # no secondary annotation for CoordCropDataset
+        self.num_classes_2  = 0
+        self.label_to_int_2 = {}
 
         if annotation_label_col and annotation_label_col in df.columns:
             raw = df[annotation_label_col].fillna("").astype(str)
